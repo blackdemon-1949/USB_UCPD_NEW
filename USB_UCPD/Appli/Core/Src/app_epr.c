@@ -4,6 +4,9 @@
  */
 #include "app_epr.h"
 #include "app_log.h"
+#if APP_ENG_EPR
+#include "usbpd_core.h"
+#endif
 
 #include <string.h>
 #include <stdio.h>
@@ -227,6 +230,31 @@ void APP_EPR_OnSrcPdo(const uint8_t *ptr, uint32_t size)
       APP_EPR_Ctx.src_max_pdp_w = APP_EPR_AVS_PDP_W(pdo);
     }
   }
+
+#if defined(USBPDCORE_EPR) && (defined(USBPDCORE_SNK) || defined(USBPDCORE_DRP))
+  /* THE ACTUAL MISSING WIRING.
+   *
+   * usbpd_def.h:137-145 enables USBPDCORE_EPR together with SNK/DRP for the
+   * PD3_FULL build, so usbpd_pe_epr.o is compiled into the library and
+   * USBPD_PE_Request_EPRModeEnter() is declared in usbpd_core.h:1215.  Until
+   * now nothing in the application ever called it: the sink advertised its
+   * AVS PDO through the DPM data-info path but never asked the policy engine
+   * to enter EPR mode.  With an SPR-only source this was invisible; with an
+   * EPR-capable source it is the reason no EPR session starts.
+   *
+   * Only request entry when the source actually advertised AVS PDOs and the
+   * operator has not disabled EPR.  Non-blocking: this posts a request to the
+   * PE and returns, so it is safe to call from the DPM callback path. */
+  if ((APP_EPR_Ctx.src_epr_capable != 0u) &&
+      (APP_EPR_Ctx.enable != 0u) &&
+      (APP_EPR_Ctx.mode == 0u))
+  {
+    USBPD_StatusTypeDef st = USBPD_PE_Request_EPRModeEnter(0u);
+    APP_EPR_Ctx.enter_req_st = (uint8_t)st;
+    APP_LOG_Printf("EPR: source advertises AVS -> requested EPR mode entry (st=%d)\r\n",
+                   (int)st);
+  }
+#endif
 }
 
 void APP_EPR_OnNotify(uint32_t event)

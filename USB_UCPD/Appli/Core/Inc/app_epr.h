@@ -86,6 +86,7 @@ typedef struct
   uint32_t want_ma;
 
   uint8_t  src_epr_capable; /* source advertised EPR capability        */
+  uint8_t  enter_req_st;    /* last USBPD_PE_Request_EPRModeEnter() status */
   uint8_t  n_src_avs;       /* number of EPR AVS PDOs received         */
   uint32_t src_avs[7];      /* received EPR source AVS PDOs            */
   uint32_t src_min_mv;      /* widest offered window                   */
