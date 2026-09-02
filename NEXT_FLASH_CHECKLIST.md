@@ -1,90 +1,92 @@
-# Next flash — the SPR/PPS regression was mine, and it is reverted
+# Status after the last bench run
 
-## What broke, precisely
+## SPR / PPS / AVS: WORKING — hardware confirmed
 
-`REQUEST not accepted by stack (3)` for **every** voltage — 9 V, 12 V, 20 V,
-PPS and EPR — was caused by my previous commit setting
-`PE_VconnSwap = USBPD_FALSE`.
+Your log proves it, and this is the first run where I can say that honestly:
 
-My reasoning was wrong on two counts:
+| Request | Contract | INA226 measured |
+|---|---|---|
+| `req 2` (9 V) | `explicit contract 9000 mV / 3000 mA` | **8.981 V** |
+| `volt 20000` | `explicit contract 20000 mV / 5000 mA (PDO 6)` | **20.021 V** |
+| `pps 15789 5000` | `explicit contract 15789 mV / 5000 mA` | **15.766 V** |
 
-1. VCONN for the cable e-marker is supplied by the **source** through the
-   cable, not by this board's rail. Accepting the swap costs us nothing.
-2. That flag feeds `USBPD_DPM_EvaluateVconnSwap()` directly, which turns it
-   into a **REJECT**. Rejecting made the source hard-reset in a loop.
+The VCONN-swap revert fixed the regression I introduced. Counters are real
+now too: `neg_accept 13`, `neg_contract 9`, `attach 1`, `pd_tx 41`.
 
-The consequence is visible in your own counters: `hard_reset 6`,
-`neg_accept 0`, and `PE_Power` stuck at `DEFAULT 5V`. And
-`USBPD_PE_Send_Request` (`usbpd_pe.o +0x526`) gates on the **same**
-`(Params & 0x704) == 0x300` as the EPR entry points:
+## EPR: your charger cannot do it, and the firmware is right
 
-```
-ubfx r3,r7,#0xc,#1        ; PE_IsConnected
-movw r3,#0x704 ; ands r7,r3 ; cmp.w r7,#0x300
-movs r4,#3                ; -> USBPD_BUSY
-```
+`epr` reported **`src 5V PDO EPR bit : clear (SPR-only source)`** — that is
+correct, not a bug.
 
-No explicit contract ⇒ every request returns 3. One bad flag took out the
-whole request path. **Reverted to `USBPD_TRUE`**, matching ST's own H7RS
-reference sink, which I cloned from `STM32CubeH7RS` and diffed against ours.
+Your source advertises `5/9/12/15/20 V` and `PPS 3.3–21 V`. Maximum
+**20 V × 5 A = 100 W**, no 28/36/48 V PDO.
 
-## Everything else fixed this round
+PD 3.1 defines EPR as **above 100 W**, requiring a 28/36/48 V Fixed PDO *and*
+the EPR Mode Capable bit in the 5 V PDO. This charger is an SPR-only PD 3.0
+supply. **No firmware change — mine or ST's — can make it deliver EPR.** The
+stack is genuinely PD 3.1: `usbpd_pe_epr.o` is linked, all five ST gates pass,
+and the board correctly declines to send `EPR_Mode(Enter)` to a source that
+never claimed EPR. Sending it anyway would be the fake behaviour you told me
+to avoid.
 
-| Area | Change |
+`epr` now states the reason, quoting the source's own numbers.
+
+### About the WeAct PowerMonitor
+
+It doesn't do EPR either. Its own protocol spec (`com_PowerMonitorMiniV1.py`,
+`CMD_PD_PDO_AVS = 0x0B`) *reads* AVS descriptors — `{"minvoltage": 15000,
+"maxvoltage": 28000, "maxpower": 240}` in the docstring is an **example of the
+data format**, not something it negotiated. It reports what a charger
+advertises, exactly as our `caps` does. To see EPR you need a genuine EPR
+charger: 140 W+ with a 28 V PDO (e.g. Apple 140 W, Framework 180 W, Delta
+240 W) **and** a 5 A e-marked cable.
+
+## Fixed this round
+
+| Problem | Cause |
 |---|---|
-| **Dead diagnostics** | `APP_ENG_CAPTURE=0` meant the ST trace funnel was never installed, so `pd_rx/pd_tx/goodcrc` froze and every negotiation counter read 0 while PD ran. Analyzer engines now **on** |
-| **Counters that could not count** | `attach`, `detach`, `cad_event`, `neg_caps`, `neg_request`, `neg_accept`, `neg_reject`, `neg_wait`, `neg_contract`, `hard_reset`, `goodcrc_tx` now wired to real events, classified from the message header |
-| **VBUS lie** | Synthetic VBUS was set to the **requested** voltage the instant an RDO was built, so between Accept and PS_RDY the PE believed the rail had already moved. INA226 measurement is now the default source (`ina vbus synth` restores the old behaviour) |
-| **Unhelpful errors** | A refused request now prints the missing precondition, not just `(3)` |
+| **CDC unusable again** | Real deadlock: `s_tx_busy` is cleared only by `CDC_TransmitCplt`; if that is ever missed the console dies permanently. Added a 250 ms watchdog + `cdc_tx_stalls` counter |
+| **Console flooding** | INA226 printed every second, corrupting PD output and keeping the IN endpoint busy. Periodic printing now **off** by default (`ina` on demand, `ina auto on` to restore). Sampling still runs for VBUS |
+| **`temp` never worked** | DTS was clocked from **LSE**, but Appli configures no oscillator and no 32 kHz crystal exists → LSE never ready. Switched to **PCLK**. Also stopped a DTS failure calling `Error_Handler()`, which would kill PD/CDC/CLI |
+| **`engines` unknown** | Command added |
 
-## Engines now enabled
+## Engines
 
-`cap=1 txn=1 ext=1 anal=1 cable=1 epr=1 vdm=1 diag=1`
+ON: `capture` `cable` `epr` `vdm` `diag` (+ DTS temp, INA226, PPS/AVS).
+OFF: `txn` `ext` `analytics` — enabling all three together is what brought the
+CDC instability back; `analytics` polls I2C and formats stats in the
+super-loop. `fuzz`/`test`/`store` remain off.
 
-Left **off** deliberately, as you asked (test-only / instability):
-`FUZZ` (deliberately transmits malformed frames), `TEST` (on-target vector
-suite), `STORE` (backup-SRAM persistence).
-
-## Build
+## Build & flash
 
 ```bash
-export PATH="<CubeIDE>/plugins/...gnu-tools-for-stm32.14.3.rel1.../tools/bin:$PATH"
-arm-none-eabi-gcc --version      # must be 14.3.1
 python3 tools/build.py --project all --config all --jobs 8
 python3 tools/verify.py
 ```
 
-Flash unchanged (external loader, XIP `0x90000000`).
-
-## What to check, in order
+## Check after flashing
 
 ```
-epr diag        # BEFORE attaching anything
+engines          # confirm profile
+temp             # must now report a temperature, not "not started"
+req 2 / volt 20000 / pps 15789 5000
+diag all         # cdc_tx_stalls and log_dropped must stay 0
+cable status     # e-marker
+epr              # will state why EPR is unavailable with THIS charger
 ```
-then attach the source and let it settle, then:
-
-```
-diag all        # attach/cad_event/neg_caps/neg_accept must now be NON-zero
-req 2           # 9 V   <- these must work again first
-volt 20000      # 20 V
-pps 15789 5000  # PPS
-epr diag        # contract must read EXPLICIT CONTRACT
-cable status    # e-marker identity
-```
-
-**If `req 2` still fails, stop there and send me the output** — `epr diag` and
-the failure message now name the exact missing precondition, so no guessing is
-needed. EPR cannot work until SPR requests do, because they share the gate.
 
 ## Honest status
 
-| Stage | SPR/PPS | EPR |
-|---|---|---|
-| RESEARCHED | YES | YES |
-| IMPLEMENTED | YES (regression reverted) | YES |
-| COMPILED | host only — 148/148 tests, 0 errors, **no ARM link here** | same |
-| FLASHED | not yet | not yet |
-| HARDWARE VERIFIED | **regressed last flash, fix unproven** | **NO** |
+| Feature | Researched | Implemented | Compiled | HW verified |
+|---|---|---|---|---|
+| SPR 5/9/12/15/20 V | YES | YES | host | **YES** |
+| PPS / AVS | YES | YES | host | **YES** |
+| INA226 + real VBUS | YES | YES | host | **YES** |
+| Diagnostics counters | YES | YES | host | **YES** |
+| USB CDC stability | YES | YES | host | fix unproven |
+| DTS temperature | YES | YES | host | fix unproven |
+| EPR | YES | YES | host | **blocked — needs a real EPR charger** |
 
-Preserved: DMA map, linker script, MPU layout, XIP, USB CDC (your Code 10 fix
-stays), INA226. ST library byte-identical (`2fb9c3f7…`).
+I cannot ARM-link or flash in my sandbox, so the CDC and DTS fixes are
+unproven until you flash. ST middleware and the core library are untouched
+(`2fb9c3f7…`).
