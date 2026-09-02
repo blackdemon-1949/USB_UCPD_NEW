@@ -1,5 +1,6 @@
 #include "app_cli.h"
 #include "app_log.h"
+#include "app_engines.h"
 #include "app_pd.h"
 #include "app_board.h"
 #include "app_cmd.h"
@@ -92,6 +93,7 @@ void APP_CLI_PrintHelp(void)
     "  softreset / hardreset  PD soft / hard reset\r\n"
     "  pd                     UCPD registers + PHY counters\r\n"
     "  info                   board / memory / clocks\r\n"
+    "  engines                which features are compiled into this build\r\n"
     "  led on|off|hb          LED override\r\n"
     "  help                   this list\r\n"
     "\r\n"
@@ -229,6 +231,14 @@ static void handle_line(char *line)
   else if ((strcmp(argv[0], "ina") == 0) || (strcmp(argv[0], "ina226") == 0))
   {
     INA226_Cli(argc, argv);
+  }
+  else if (strcmp(argv[0], "engines") == 0)
+  {
+    /* The startup line scrolls away; make the build profile queryable. */
+    APP_LOG_Write("compiled-in engines\r\n  " APP_ENG_SUMMARY "\r\n");
+    APP_LOG_Printf("  console    : dropped %lu bytes, %lu TX stalls\r\n",
+                   (unsigned long)APP_LOG_Dropped(),
+                   (unsigned long)APP_LOG_TxStalls());
   }
   else if (strcmp(argv[0], "info") == 0)
   {

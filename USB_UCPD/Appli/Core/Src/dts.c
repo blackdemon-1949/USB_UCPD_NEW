@@ -39,15 +39,27 @@ void MX_DTS_Init(void)
   /* USER CODE END DTS_Init 1 */
   hdts.Instance = DTS;
   hdts.Init.QuickMeasure = DTS_QUICKMEAS_DISABLE;
-  hdts.Init.RefClock = DTS_REFCLKSEL_LSE;
+  /* HARDWARE FIX: reference clock must be PCLK, not LSE.
+   *
+   * 'temp' reported "DTS not started" on every run.  The Appli never
+   * configures any oscillator (the Boot project owns the clock tree) and this
+   * board has no 32.768 kHz crystal fitted, so LSE never becomes ready and
+   * the DTS reference clock is dead - HAL_DTS_Start() can never succeed.
+   * PCLK is always running.  With PCLK the driver requires a valid divider
+   * (IS_DTS_DIVIDER_RATIO_NUMBER, 0..127); a non-zero value is needed because
+   * the frequency measurement divides by it. */
+  hdts.Init.RefClock = DTS_REFCLKSEL_PCLK;
   hdts.Init.TriggerInput = DTS_TRIGGER_HW_NONE;
   hdts.Init.SamplingTime = DTS_SMP_TIME_15_CYCLE;
-  hdts.Init.Divider = 0;
+  hdts.Init.Divider = 63;
   hdts.Init.HighThreshold = 0x0;
   hdts.Init.LowThreshold = 0x0;
   if (HAL_DTS_Init(&hdts) != HAL_OK)
   {
-    Error_Handler();
+    /* A dead temperature sensor must not brick the bench.  Error_Handler()
+     * disables interrupts and blinks for ever, which would take PD, CDC and
+     * the CLI down with it.  Report and continue; 'temp' says it is off. */
+    hdts.Instance = NULL;
   }
   /* USER CODE BEGIN DTS_Init 2 */
 

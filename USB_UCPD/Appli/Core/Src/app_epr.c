@@ -20,6 +20,11 @@
 #include "main.h"          /* HAL_GetTick */
 #endif
 
+/* Declared here rather than including app_pd.h: that header pulls in the ST
+ * target headers, which do not exist in the host test build. */
+uint32_t APP_PD_SrcMaxFixedMv(uint8_t port);
+uint32_t APP_PD_SrcMaxFixedW(uint8_t port);
+
 #if !defined(APP_EPR_TARGET_PROBE)
 /* Host build: no HAL tick source.  The reply watchdog is target behaviour and
  * is not exercised by the host tests, so a monotonic stub is sufficient. */
@@ -912,6 +917,33 @@ int APP_EPR_Cmd(int argc, char *argv[])
                      ? (APP_EPR_Ctx.mode ? "EPR contract active"
                                          : "EPR available, not entered")
                      : "EPR unavailable on this session");
+
+    /* Say WHY EPR is unavailable, from the source's own advertisement.
+     *
+     * PD3.1: EPR exists only above 100 W and requires the source to offer a
+     * 28 V, 36 V or 48 V Fixed PDO and to set the EPR Mode Capable bit (B23)
+     * in its 5 V Fixed PDO.  A 100 W / 20 V-max charger is SPR-only by
+     * definition, and no amount of firmware can make it deliver EPR.
+     * Reporting that plainly is the honest answer. */
+    if ((APP_EPR_Ctx.src_spr_epr_capable == 0u) &&
+        (APP_EPR_Ctx.src_epr_capable == 0u))
+    {
+      uint32_t maxmv = APP_PD_SrcMaxFixedMv(0u);
+      uint32_t maxw  = APP_PD_SrcMaxFixedW(0u);
+
+      if (maxmv != 0u)
+      {
+        APP_LOG_Printf("  reason     : source tops out at %lu mV / %lu W and "
+                       "does not set the EPR bit in its 5 V PDO\r\n",
+                       (unsigned long)maxmv, (unsigned long)maxw);
+        APP_LOG_Write("               EPR needs a 28/36/48 V PDO and >100 W. "
+                      "This is an SPR-only supply.\r\n");
+      }
+      else
+      {
+        APP_LOG_Write("  reason     : no source capabilities received yet\r\n");
+      }
+    }
     APP_LOG_Write("  -- sink capability (configuration only) --\r\n");
     APP_LOG_Printf("  enable     : %s\r\n", APP_EPR_Ctx.enable ? "on" : "off");
     APP_LOG_Printf("  ceiling    : %lu mV\r\n",

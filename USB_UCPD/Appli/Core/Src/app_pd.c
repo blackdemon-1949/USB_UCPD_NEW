@@ -410,6 +410,69 @@ void APP_PD_StoreSrcPDO(uint8_t port, const uint8_t *ptr, uint32_t size)
      notification, once the PE has finished its default 5 V negotiation. */
 }
 
+/**
+  * @brief  Highest Fixed-PDO voltage the attached source advertises, in mV.
+  *
+  * Used to explain an EPR verdict from the source's own advertisement rather
+  * than from an assumption.
+  */
+uint32_t APP_PD_SrcMaxFixedMv(uint8_t port)
+{
+  uint32_t best = 0u;
+  uint8_t i;
+
+  if (port >= USBPD_PORT_COUNT)
+  {
+    return 0u;
+  }
+  for (i = 0u; i < APP_PD_Port[port].NumberOfRcvSRCPDO; i++)
+  {
+    USBPD_PDO_TypeDef u;
+
+    u.d32 = APP_PD_Port[port].ListOfRcvSRCPDO[i];
+    if (u.GenericPDO.PowerObject == USBPD_CORE_PDO_TYPE_FIXED)
+    {
+      uint32_t mv = (uint32_t)u.SRCFixedPDO.VoltageIn50mVunits * 50u;
+
+      if (mv > best)
+      {
+        best = mv;
+      }
+    }
+  }
+  return best;
+}
+
+/** Highest Fixed-PDO power the attached source advertises, in W. */
+uint32_t APP_PD_SrcMaxFixedW(uint8_t port)
+{
+  uint32_t best = 0u;
+  uint8_t i;
+
+  if (port >= USBPD_PORT_COUNT)
+  {
+    return 0u;
+  }
+  for (i = 0u; i < APP_PD_Port[port].NumberOfRcvSRCPDO; i++)
+  {
+    USBPD_PDO_TypeDef u;
+
+    u.d32 = APP_PD_Port[port].ListOfRcvSRCPDO[i];
+    if (u.GenericPDO.PowerObject == USBPD_CORE_PDO_TYPE_FIXED)
+    {
+      uint32_t mv = (uint32_t)u.SRCFixedPDO.VoltageIn50mVunits * 50u;
+      uint32_t ma = (uint32_t)u.SRCFixedPDO.MaxCurrentIn10mAunits * 10u;
+      uint32_t w  = (mv * ma) / 1000000u;
+
+      if (w > best)
+      {
+        best = w;
+      }
+    }
+  }
+  return best;
+}
+
 void APP_PD_RequestCapsPrint(void)
 {
   /* Force the next received Source_Capabilities to be printed even if the

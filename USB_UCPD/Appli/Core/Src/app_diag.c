@@ -201,6 +201,13 @@ int APP_DIAG_Cmd(int argc, char *argv[])
     dump_range(APP_DIAG_NEG_CAPS, APP_DIAG_NEG_EPR, "negotiation");
     dump_range(APP_DIAG_ATTACH, APP_DIAG_CAD_EVENT, "attach");
     dump_range(APP_DIAG_CDC_TX, APP_DIAG_CDC_SUSPEND, "USB CDC");
+    /* Console health, measured rather than assumed: bytes lost to a full
+     * queue and IN transfers the stall watchdog had to abandon.  Both being
+     * zero is what "the CDC is healthy" actually means. */
+    APP_LOG_Printf("  log_dropped      %lu\r\n",
+                   (unsigned long)APP_LOG_Dropped());
+    APP_LOG_Printf("  cdc_tx_stalls    %lu\r\n",
+                   (unsigned long)APP_LOG_TxStalls());
     dump_range(APP_DIAG_I2C_ERR, APP_DIAG_INA_MISSING, "I2C / INA226");
     dump_range(APP_DIAG_DMA_ERR, APP_DIAG_CACHE_CLEAN, "DMA / cache");
     dump_range(APP_DIAG_PWR_SAMPLES, APP_DIAG_TEMP_ALERT, "power / thermal");

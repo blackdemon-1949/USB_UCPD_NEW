@@ -29,7 +29,9 @@ void APP_TEMP_Init(void)
   s_t.started = 0u;
   s_t.error = 0u;
 
-  if (HAL_DTS_Start(&hdts) == HAL_OK)
+  /* dts.c clears Instance when HAL_DTS_Init() failed, so do not call Start
+   * on an uninitialised handle. */
+  if ((hdts.Instance != NULL) && (HAL_DTS_Start(&hdts) == HAL_OK))
   {
     s_t.started = 1u;
   }
@@ -143,7 +145,8 @@ int APP_TEMP_Cmd(int argc, char *argv[])
 
   if (s_t.started == 0u)
   {
-    APP_LOG_Write("DTS not started (MX_DTS_Init failed?)\r\n");
+    APP_LOG_Write("DTS not started - sensor unavailable "
+                  "(HAL_DTS_Init/Start failed)\r\n");
     return 1;
   }
 

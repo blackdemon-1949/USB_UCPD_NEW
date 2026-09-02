@@ -1,6 +1,7 @@
 #include "app_log.h"
 #include "usbd_cdc_if.h"
 #include "usb_device.h"
+#include "main.h"       /* HAL_GetTick */
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
@@ -16,6 +17,11 @@ static uint16_t s_tail;
 static uint8_t  s_usb_ready;
 static volatile uint8_t s_tx_busy;
 static uint32_t s_dropped;      /* bytes discarded because the queue was full */
+static uint32_t s_tx_start;     /* tick when the in-flight IN transfer began  */
+static uint32_t s_tx_stalls;    /* IN transfers abandoned by the watchdog     */
+
+/* An IN transfer that has not completed in this long is treated as lost. */
+#define APP_LOG_TX_TIMEOUT_MS  250u
 static uint8_t  s_drop_flagged; /* 1 = a drop notice is still owed to the host */
 /* CDC IN DMA reads this buffer; it must not be held in a stale D-cache line. */
 static uint8_t  s_tx[256]
@@ -96,6 +102,11 @@ uint32_t APP_LOG_Dropped(void)
   return s_dropped;
 }
 
+uint32_t APP_LOG_TxStalls(void)
+{
+  return s_tx_stalls;
+}
+
 void APP_LOG_Write(const char *s)
 {
   if (s == NULL)
@@ -137,7 +148,23 @@ void APP_LOG_Flush(void)
   }
   if (s_tx_busy != 0U)
   {
-    return;
+    /* Watchdog on the IN transfer.
+     *
+     * s_tx_busy is cleared by CDC_TransmitCplt.  If that callback is ever
+     * missed - a bus reset mid-transfer, a host that stops polling, Windows
+     * selective suspend, a port closed with data in flight - the flag latches
+     * at 1 and the console is dead for ever with no way back.  That is the
+     * "CDC becomes unusable" failure seen on the bench.  Give the transfer a
+     * bounded lifetime and re-arm. */
+    if ((HAL_GetTick() - s_tx_start) >= APP_LOG_TX_TIMEOUT_MS)
+    {
+      s_tx_busy = 0U;
+      s_tx_stalls++;
+    }
+    else
+    {
+      return;
+    }
   }
   n = q_count();
   if (n == 0U)
@@ -154,6 +181,7 @@ void APP_LOG_Flush(void)
     s_tail = (uint16_t)((s_tail + 1U) % LOG_Q_SIZE);
   }
   s_tx_busy = 1U;
+  s_tx_start = HAL_GetTick();
   if (CDC_Transmit_HS(s_tx, n) != USBD_OK)
   {
     s_tx_busy = 0U;

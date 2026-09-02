@@ -308,7 +308,14 @@ void EXT_I2C_FeatureInit(void)
 
   memset(&s, 0, sizeof(s));
   s.addr = INA226_DEFAULT_ADDR;
-  s.auto_report = 1U;
+  /* Periodic console reporting defaults OFF.
+   *
+   * On the bench the once-a-second line interleaved with, and visually
+   * corrupted, PD/EPR output and every CLI response, and it keeps the CDC IN
+   * endpoint permanently busy.  Measurement still runs continuously (the PD
+   * stack reads it for VBUS); this only controls printing.  'ina' gives a
+   * reading on demand, 'ina auto on' restores the stream. */
+  s.auto_report = 0U;
   s.report_ms = INA226_REPORT_PERIOD_MS;
   s.present = 0U;
 

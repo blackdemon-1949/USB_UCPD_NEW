@@ -47,3 +47,23 @@ uint8_t APP_CBL_IsLive(void)
 {
   return 0u;         /* no Discover Identity on the host */
 }
+
+/*
+ * app_pd.c is target-only (it pulls in the ST DPM headers), so the host build
+ * stubs the two source-capability accessors the EPR verdict uses.  The
+ * verdict text they feed is target behaviour and is not asserted on the host.
+ */
+uint32_t APP_PD_SrcMaxFixedMv(uint8_t port);
+uint32_t APP_PD_SrcMaxFixedW(uint8_t port);
+
+uint32_t APP_PD_SrcMaxFixedMv(uint8_t port)
+{
+  (void)port;
+  return 0u;
+}
+
+uint32_t APP_PD_SrcMaxFixedW(uint8_t port)
+{
+  (void)port;
+  return 0u;
+}

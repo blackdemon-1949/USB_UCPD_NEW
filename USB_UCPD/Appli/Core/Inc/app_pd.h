@@ -43,6 +43,10 @@ void APP_PD_Task(void);
 USBPD_StatusTypeDef APP_PD_SendRequest(uint8_t port, uint8_t index, uint16_t mv, uint16_t ma);
 void APP_PD_PrintCaps(void);
 void APP_PD_RequestCapsPrint(void);
+/** Highest Fixed-PDO voltage (mV) the attached source advertises. */
+uint32_t APP_PD_SrcMaxFixedMv(uint8_t port);
+/** Highest Fixed-PDO power (W) the attached source advertises. */
+uint32_t APP_PD_SrcMaxFixedW(uint8_t port);
 void APP_PD_PrintStatus(void);
 void APP_PD_FormatPdo(uint32_t pdo, char *out, uint32_t outsz);
 uint8_t APP_PD_IsAttached(void);
