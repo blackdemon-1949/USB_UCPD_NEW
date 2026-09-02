@@ -247,10 +247,17 @@ static void test_epr_discovery(void)
   CHECK_EQ(APP_EPR_Ctx.src_spr_epr_capable, 1u);
   CHECK_EQ(APP_EPR_ShouldRequest(), 1u);     /* RDO B21 must now be set */
 
-  /* 'epr off' must still be able to force SPR operation. */
+  /* 'enable' controls AUTOMATIC entry only.  Turning it off must NOT clear
+   * the advertised EPR capability, otherwise a manual 'epr enter' would be
+   * rejected by the source with "EPR bit not set in RDO" (reason 0x03). */
   APP_EPR_Ctx.enable = 0u;
-  CHECK_EQ(APP_EPR_ShouldRequest(), 0u);
+  CHECK_EQ(APP_EPR_ShouldRequest(), 1u);
   APP_EPR_Ctx.enable = 1u;
+
+  /* 'allow' is the switch that really suppresses the advertisement. */
+  APP_EPR_Ctx.allow = 0u;
+  CHECK_EQ(APP_EPR_ShouldRequest(), 0u);
+  APP_EPR_Ctx.allow = 1u;
 
   /* The bit is only defined in the FIRST PDO, and only for a Fixed Supply.
    * An APDO in position 1 must never be read as an EPR advertisement. */

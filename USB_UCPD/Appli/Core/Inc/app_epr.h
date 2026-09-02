@@ -133,7 +133,8 @@ typedef struct
 
 typedef struct
 {
-  uint8_t  enable;          /* user-controlled EPR enable              */
+  uint8_t  enable;          /* 1 = enter EPR mode automatically            */
+  uint8_t  allow;           /* 1 = advertise EPR capability in the RDO      */
   uint32_t ceiling_mv;      /* never request above this                */
   uint32_t want_mv;         /* desired operating point (0 = highest)   */
   uint32_t want_ma;
@@ -195,6 +196,9 @@ void APP_EPR_FormatAvs(uint32_t pdo, char *out, size_t outsz);
 /* --- target glue ---------------------------------------------------- */
 /** Fill the Sink AVS PDO the stack will publish (USBPD_DPM_GetDataInfo). */
 uint32_t APP_EPR_GetSinkAvsPdo(void);
+/** Build the EPR sink PDO list (slots 8+ of EPR_Sink_Capabilities).
+ *  Writes at most @p max entries; returns how many were written. */
+uint32_t APP_EPR_GetSinkEprPdos(uint32_t *out, uint32_t max);
 /** EPR Sink Operational PDP in watts. */
 uint32_t APP_EPR_GetSinkPdpW(void);
 /** Refresh the 5 A cable flag from the live e-marker identity. */

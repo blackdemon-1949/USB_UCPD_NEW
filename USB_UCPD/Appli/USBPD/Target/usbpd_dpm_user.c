@@ -288,43 +288,49 @@ void USBPD_DPM_GetDataInfo(uint8_t PortNum, USBPD_CORE_DataInfoType_TypeDef Data
       (void)memcpy(Ptr, (uint8_t *)&APP_PD_Port[PortNum].RequestedVoltage, *Size);
       break;
 #if defined(USBPDCORE_EPR) && APP_ENG_EPR
-    /* EPR: the stack asks the application for the sink AVS PDO and the sink
-     * operational PDP, then drives EPR mode entry itself. */
+    /* ---- EPR sink data, supplied to the ST policy engine ----------------
+     *
+     * Buffer sizes here are NOT arbitrary.  They were read out of the
+     * shipped library (v5.4.1) by disassembly, because writing more bytes
+     * than the caller reserved corrupts its stack and faults:
+     *
+     *   EPRMode_Enter (usbpd_pe_epr.o):
+     *     push {r1..r7,lr}; Ptr = sp, Size = sp+4
+     *     -> the DPM may write EXACTLY 4 bytes.  Any more lands on the
+     *        saved registers and the return address.
+     *     DataId is 0x1E = USBPD_CORE_DATATYPE_SNK_PDP_EPR.
+     *
+     *   Send_EPR_SnkCapa (usbpd_pe_extctrl.o):
+     *     memclr(ctx+0x14, 0x104)                       260-byte buffer
+     *     GetDataInfo(SNK_PDO,     Ptr=ctx+0x14)        SPR PDOs, slots 1-7
+     *     GetDataInfo(SNK_PDO_EPR, Ptr=ctx+0x30)        EPR PDOs, slots 8+
+     *     0x30-0x14 = 28 = 7*4, so the EPR list starts at slot 8 exactly as
+     *     PD3.1 requires.  Room for USBPD_MAX_NB_EPRPDO (6) objects.
+     */
     case USBPD_CORE_DATATYPE_SNK_PDO_EPR:
     {
-      uint32_t avs = APP_EPR_GetSinkAvsPdo();
-      *Size = 4U;
-      (void)memcpy(Ptr, (uint8_t *)&avs, 4U);
+      /* EPR sink PDOs, written at slot 8 of the EPR_Sink_Capabilities list.
+       * Bounded by USBPD_MAX_NB_EPRPDO so this can never run past the
+       * library's buffer. */
+      uint32_t epr[USBPD_MAX_NB_EPRPDO];
+      uint32_t n = APP_EPR_GetSinkEprPdos(epr, USBPD_MAX_NB_EPRPDO);
+
+      *Size = n * 4U;
+      if (n != 0U)
+      {
+        (void)memcpy(Ptr, (const uint8_t *)epr, n * 4U);
+      }
     }
     break;
+
+    /* EPR Sink Operational PDP, in watts.  Used as the Data field of
+     * EPR_Mode(Enter) - PD3.1 Figure 6-32.  EXACTLY 4 bytes (see above). */
     case USBPD_CORE_DATATYPE_SNK_PDP_EPR:
     {
       uint32_t pdp = APP_EPR_GetSinkPdpW();
+
       *Size = 4U;
-      (void)memcpy(Ptr, (uint8_t *)&pdp, 4U);
-    }
-    break;
-    /* HARDWARE-DRIVEN FIX.  EPRMode_Enter() in the prebuilt library builds the
-     * EPR_Mode(Enter) Data Object by calling GetDataInfo with DataId 0x1E
-     * (USBPD_CORE_DATATYPE_RCV_REQ_COPYPDO), then doing:
-     *
-     *   blx  GetDataInfo            ; DataId 0x1e, Ptr=sp, Size=sp+4
-     *   ldr  r0,[sp]
-     *   bfi  r5,r0,#0x10,#8         ; EPRMDO.Data   = value
-     *   bfi  r5,#1, #0x18,#8        ; EPRMDO.Action = 1 (Enter)
-     *
-     * PD3.1 Figure 6-32 requires the Data field of an Enter to be the EPR
-     * Sink Operational PDP.  This case was missing, so the switch fell to
-     * 'default: *Size = 0' and the PDP byte was never written - the board
-     * transmitted EPR_Mode(Enter) with an uninitialised Data field.  On the
-     * bench that showed up as USBPD_OK from the API followed by silence from
-     * an EPR-capable source.  Supplying the real PDP is what makes the Enter
-     * well-formed. */
-    case USBPD_CORE_DATATYPE_RCV_REQ_COPYPDO:
-    {
-      uint32_t pdp = APP_EPR_GetSinkPdpW();
-      *Size = 4U;
-      (void)memcpy(Ptr, (uint8_t *)&pdp, 4U);
+      (void)memcpy(Ptr, (const uint8_t *)&pdp, 4U);
     }
     break;
 #endif /* USBPDCORE_EPR */

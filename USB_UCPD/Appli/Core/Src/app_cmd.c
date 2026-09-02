@@ -131,8 +131,8 @@ static const APP_CMD_t s_cmds[] =
     "counters, health verdict, DMA/cache coherency check",
     APP_DIAG_Cmd },
 
-  { "epr", "epr [on|off|caps|enter|exit|request|diag|ceiling <mv>|want <mv>|status]",
-    "EPR: capability, AVS PDOs, mode state, ceiling",
+  { "epr", "epr [on|off|enter|exit|caps|request|diag|ceiling <mv>|want <mv>|status]",
+    "EPR: detect/report always; on=auto-enter, enter=one manual attempt",
     APP_EPR_Cmd },
 
 #if APP_ENG_ANALYTICS

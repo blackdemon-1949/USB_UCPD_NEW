@@ -1,5 +1,6 @@
 #include "app_cli.h"
 #include "app_log.h"
+#include "main.h"
 #include "app_engines.h"
 #include "app_pd.h"
 #include "app_board.h"
@@ -106,6 +107,9 @@ void APP_CLI_PrintHelp(void)
 
 void APP_CLI_PrintBanner(void)
 {
+  /* Surface any crash from the previous run before anything else. */
+  APP_FaultReportBoot();
+
   APP_LOG_Write(
     "\r\n"
     "========================================\r\n"

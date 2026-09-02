@@ -109,12 +109,49 @@ volatile uint32_t APP_FaultCode;
 
 void APP_FaultReport(uint32_t code)
 {
+  volatile uint32_t *bkp = (volatile uint32_t *)0x38800000uL; /* BKPSRAM */
+
   APP_FaultCode = code;
   APP_FaultCFSR = SCB->CFSR;
   APP_FaultHFSR = SCB->HFSR;
   APP_FaultMMAR = SCB->MMFAR;
   APP_FaultBFAR = SCB->BFAR;
+
+  /* Survive the reset.  A fault that only blinks an LED tells us almost
+   * nothing; BKPSRAM is retained across a warm reset, so stash the fault
+   * registers there and let the next boot print them.  That turns
+   * "it bricks" into an exact fault type and faulting address. */
+  bkp[0] = 0xFA017EDDuL;   /* magic */
+  bkp[1] = code;
+  bkp[2] = APP_FaultCFSR;
+  bkp[3] = APP_FaultHFSR;
+  bkp[4] = APP_FaultMMAR;
+  bkp[5] = APP_FaultBFAR;
+
   Appli_Fail((uint8_t)code);
+}
+
+/**
+  * @brief  Print and clear a fault record left in BKPSRAM by a previous run.
+  */
+void APP_FaultReportBoot(void)
+{
+  volatile uint32_t *bkp = (volatile uint32_t *)0x38800000uL;
+
+  if (bkp[0] != 0xFA017EDDuL)
+  {
+    return;
+  }
+  APP_LOG_Printf("\r\n*** PREVIOUS RUN FAULTED: %s (code %lu)\r\n",
+                 (bkp[1] == 2u) ? "HardFault" :
+                 (bkp[1] == 3u) ? "MemManage" :
+                 (bkp[1] == 4u) ? "BusFault"  :
+                 (bkp[1] == 5u) ? "UsageFault" : "Error_Handler",
+                 (unsigned long)bkp[1]);
+  APP_LOG_Printf("    CFSR=0x%08lX HFSR=0x%08lX MMFAR=0x%08lX BFAR=0x%08lX\r\n",
+                 (unsigned long)bkp[2], (unsigned long)bkp[3],
+                 (unsigned long)bkp[4], (unsigned long)bkp[5]);
+  bkp[0] = 0u;
 }
 
 /** Public wrapper so middleware (usbpd.c) can report a fatal init error
@@ -191,6 +228,11 @@ int main(void)
   APP_STORE_Init();
 #endif
   APP_LED_Set(APP_LED_HEARTBEAT);
+
+  /* Backup SRAM: keeps the fault record across a warm reset so a crash can
+   * be diagnosed on the next boot instead of only blinking an LED. */
+  HAL_PWR_EnableBkUpAccess();
+  __HAL_RCC_BKPRAM_CLK_ENABLE();
 
   /* I2C2 / SPI extension footprints (see ext_i2c.c / ext_spi.c) */
   EXT_I2C_Init();

@@ -53,7 +53,19 @@ static void epr_snprintf(char *out, size_t outsz, const char *fmt, ...)
 void APP_EPR_Init(void)
 {
   memset(&APP_EPR_Ctx, 0, sizeof(APP_EPR_Ctx));
-  APP_EPR_Ctx.enable = 1u;
+  /* EPR mode entry is MANUAL by default.
+   *
+   * Automatic entry ran unattended the instant an EPR-capable source
+   * attached.  When entry then faulted, the board came up, auto-entered,
+   * and faulted again - an unrecoverable boot loop that needed the reset
+   * button and made the bench unusable.  A feature that can brick the tool
+   * must not arm itself.
+   *
+   * 'epr on' enables automatic entry; 'epr enter' performs a single manual
+   * attempt.  Detection, reporting and the RDO EPR-capable bit are
+   * unaffected and still run automatically. */
+  APP_EPR_Ctx.enable = 0u;   /* automatic entry: off */
+  APP_EPR_Ctx.allow  = 1u;   /* advertise EPR capability: on */
   APP_EPR_Ctx.ceiling_mv = APP_EPR_DEFAULT_CEILING_MV;
   APP_EPR_Ctx.want_mv = 0u;      /* 0 = highest the source and cable allow */
   APP_EPR_Ctx.want_ma = 5000u;
@@ -189,6 +201,66 @@ void APP_EPR_FormatAvs(uint32_t pdo, char *out, size_t outsz)
 /* ------------------------------------------------------------------ */
 /* Target glue                                                         */
 /* ------------------------------------------------------------------ */
+
+/**
+  * @brief  Build the EPR Sink PDO list (slots 8..13 of EPR_Sink_Capabilities).
+  * @param  out   destination, caller supplies at least @p max entries
+  * @param  max   capacity in PDOs (the library reserves USBPD_MAX_NB_EPRPDO)
+  * @retval number of PDOs written
+  *
+  * PD3.1 6.4.1.3: an EPR sink advertises Fixed PDOs above 20 V and/or an EPR
+  * AVS APDO.  Only objects the board can actually accept are listed - the
+  * ceiling (default 28 V) and the cable's current rating bound them, so this
+  * never claims capability the hardware does not have.
+  *
+  * Bounded by @p max on every path: this list is written straight into the
+  * policy engine's message buffer, so an overrun corrupts the stack.
+  */
+uint32_t APP_EPR_GetSinkEprPdos(uint32_t *out, uint32_t max)
+{
+  uint32_t n = 0u;
+  uint32_t ceiling = APP_EPR_Ctx.ceiling_mv;
+  uint32_t ma;
+
+  if ((out == NULL) || (max == 0u))
+  {
+    return 0u;
+  }
+  if (ceiling > APP_EPR_MAX_MV)
+  {
+    ceiling = APP_EPR_MAX_MV;
+  }
+
+  /* Current the cable is rated for; 3 A unless an e-marker confirmed 5 A. */
+  ma = (APP_EPR_Ctx.cable_5a != 0u) ? 5000u : 3000u;
+
+  /* EPR Fixed PDOs the board will accept, in ascending voltage, each only if
+   * it is at or below the configured ceiling. */
+  {
+    static const uint32_t fixed_mv[3] = { 28000u, 36000u, 48000u };
+    uint32_t i;
+
+    for (i = 0u; (i < 3u) && (n < max); i++)
+    {
+      if (fixed_mv[i] > ceiling)
+      {
+        break;
+      }
+      /* Sink Fixed PDO: B31..30 = 00, voltage in 50 mV, current in 10 mA. */
+      out[n] = ((fixed_mv[i] / 50u) << 10) | (ma / 10u);
+      n++;
+    }
+  }
+
+  /* One EPR AVS APDO covering 15 V .. ceiling, if there is room. */
+  if (n < max)
+  {
+    out[n] = APP_EPR_BuildAvsPdo(APP_EPR_GetSinkPdpW(), 15000u, ceiling, 0u, 1u);
+    n++;
+  }
+
+  return n;
+}
 
 uint32_t APP_EPR_GetSinkAvsPdo(void)
 {
@@ -685,6 +757,9 @@ void APP_EPR_OnModeDo(const uint8_t *ptr, uint32_t size)
   APP_EPR_Ctx.last_action = action;
   APP_EPR_Ctx.last_mode_do = do32;
 
+  /* This runs inside USBPD_DPM_SetDataInfo, i.e. on the policy engine's own
+   * call stack.  Keep it to counters and flags: no PE calls, no blocking.
+   * The single-line reports below are queued, never transmitted here. */
   switch (action)
   {
     case APP_EPR_ACT_ENTER_FAILED:
@@ -804,7 +879,12 @@ uint8_t APP_EPR_ShouldRequest(void)
    * the source advertised EPR in its 5 V Fixed PDO.  The source Shall have
    * seen this bit in the most recent Request before it will honour an
    * EPR_Mode(Enter); see PD3.1 6.4.10.1. */
-  return ((APP_EPR_Ctx.enable != 0u) &&
+  /* Deliberately NOT gated on APP_EPR_Ctx.enable.  'enable' controls whether
+   * the board AUTOMATICALLY enters EPR mode; advertising that the sink is
+   * EPR-capable is a statement of fact about this hardware and must stay
+   * true, otherwise a manual 'epr enter' would be refused by the source for
+   * "EPR Mode Capable bit not set in the RDO" (PD3.1 6.4.10.1, reason 0x03). */
+  return ((APP_EPR_Ctx.allow != 0u) &&
           ((APP_EPR_Ctx.src_spr_epr_capable != 0u) ||
            (APP_EPR_Ctx.src_epr_capable != 0u)))
          ? 1u : 0u;
@@ -855,7 +935,7 @@ int APP_EPR_Cmd(int argc, char *argv[])
   }
   else if (strcmp(argv[1], "enter") == 0)
   {
-    APP_EPR_Ctx.enable = 1u;
+    /* One manual attempt.  Does NOT arm automatic entry - that is 'epr on'. */
     (void)APP_EPR_ModeEnter(0u);
   }
   else if (strcmp(argv[1], "exit") == 0)
@@ -955,7 +1035,9 @@ int APP_EPR_Cmd(int argc, char *argv[])
       }
     }
     APP_LOG_Write("  -- sink capability (configuration only) --\r\n");
-    APP_LOG_Printf("  enable     : %s\r\n", APP_EPR_Ctx.enable ? "on" : "off");
+    APP_LOG_Printf("  auto-enter : %s   (epr on|off)\r\n",
+                   APP_EPR_Ctx.enable ? "on" : "off - use 'epr enter'");
+    APP_LOG_Printf("  advertise  : %s\r\n", APP_EPR_Ctx.allow ? "EPR-capable" : "suppressed");
     APP_LOG_Printf("  ceiling    : %lu mV\r\n",
                    (unsigned long)APP_EPR_Ctx.ceiling_mv);
     APP_LOG_Printf("  sink PDP   : %lu W\r\n",
