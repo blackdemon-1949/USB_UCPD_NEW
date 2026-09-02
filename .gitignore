@@ -1,0 +1,26 @@
+# Extracted reference copy of the original project (kept in-repo as the
+# USB_UCPD_ORIGINAL_workingButminimal.zip archive instead).
+.reference/
+
+# Local toolchain (not part of the project)
+.toolchain/
+
+# STM32CubeIDE / GCC build output
+Debug/
+Release/
+*/Debug/
+*/Release/
+*.o
+*.d
+*.su
+*.elf
+*.map
+*.hex
+*.bin
+*.lst
+*.list
+*.srec
+
+# Python bytecode
+__pycache__/
+*.pyc
