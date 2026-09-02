@@ -331,6 +331,78 @@ static void test_epr_cli_honesty(void)
   CHECK(strstr(log_stub_text(), "EPR contract active") == NULL);
 }
 
+/* Regressions for the three defects the real bench run exposed. */
+static void test_epr_hw_regressions(void)
+{
+  uint32_t caps[1];
+  char *argv[4];
+
+  printf("test_epr_hw_regressions\n");
+  APP_EPR_Init();
+
+  /* (1) 'epr' must not report a status for a call that never happened.
+   *     USBPD_OK is 0, so an untouched field used to read as success. */
+  log_stub_reset();
+  argv[0] = (char *)"epr"; argv[1] = (char *)"status";
+  CHECK_EQ(APP_EPR_Cmd(2, argv), 1);
+  CHECK(strstr(log_stub_text(), "last Enter status  : not attempted") != NULL);
+  CHECK(strstr(log_stub_text(), "last GetSrcCap st  : not attempted") != NULL);
+  /* and must not claim an EPR_Mode exchange that never occurred */
+  CHECK(strstr(log_stub_text(), "none (no EPR_Mode message exchanged)") != NULL);
+
+  /* (2) Sink Operational PDP must reflect the cable, not assume 5 A.
+   *     28 V x 3 A = 84 W with a non-e-marked cable, not 140 W. */
+  APP_EPR_Ctx.ceiling_mv = 28000u;
+  APP_EPR_Ctx.cable_5a = 0u;
+  CHECK_EQ(APP_EPR_GetSinkPdpW(), 84u);
+  APP_EPR_Ctx.cable_5a = 1u;
+  CHECK_EQ(APP_EPR_GetSinkPdpW(), 140u);
+  /* never exceed the 240 W EPR maximum */
+  APP_EPR_Ctx.ceiling_mv = 48000u;
+  CHECK_EQ(APP_EPR_GetSinkPdpW(), 240u);
+  APP_EPR_Ctx.ceiling_mv = 28000u;
+
+  /* (3) An "Enter Failed" reply must be decoded, with its reason code, and
+   *     must not leave the engine believing EPR is active. */
+  {
+    /* Action 0x04 = Enter Failed, Data 0x01 = cable not EPR capable */
+    uint8_t mdo[4];
+    uint32_t d32 = (0x04u << 24) | (0x01u << 16);
+    mdo[0] = (uint8_t)(d32 & 0xFFu);
+    mdo[1] = (uint8_t)((d32 >> 8) & 0xFFu);
+    mdo[2] = (uint8_t)((d32 >> 16) & 0xFFu);
+    mdo[3] = (uint8_t)((d32 >> 24) & 0xFFu);
+
+    log_stub_reset();
+    APP_EPR_OnModeDo(mdo, 4u);
+    CHECK_EQ(APP_EPR_Ctx.mode, 0u);
+    CHECK_EQ(APP_EPR_Ctx.error_valid, 1u);
+    CHECK_EQ(APP_EPR_Ctx.last_error, 0x01u);
+    CHECK(strstr(log_stub_text(), "cable not EPR capable") != NULL);
+
+    /* Enter Succeeded must set EPR mode. */
+    d32 = (0x03u << 24);
+    mdo[0] = (uint8_t)(d32 & 0xFFu);
+    mdo[1] = (uint8_t)((d32 >> 8) & 0xFFu);
+    mdo[2] = (uint8_t)((d32 >> 16) & 0xFFu);
+    mdo[3] = (uint8_t)((d32 >> 24) & 0xFFu);
+    APP_EPR_OnModeDo(mdo, 4u);
+    CHECK_EQ(APP_EPR_Ctx.mode, 1u);
+    CHECK_EQ(APP_EPR_Ctx.entered, 1u);
+
+    /* Malformed / short objects must be ignored, not misparsed. */
+    APP_EPR_OnModeDo(NULL, 4u);
+    APP_EPR_OnModeDo(mdo, 2u);
+    CHECK_EQ(APP_EPR_Ctx.mode, 1u);
+  }
+
+  /* Source advertising EPR in the 5 V PDO still drives RDO B21. */
+  APP_EPR_Init();
+  caps[0] = (100u << 10) | (300u << 0) | APP_EPR_SRC_FIXED_EPR_CAPABLE;
+  APP_EPR_OnSprSrcCaps(caps, 1u);
+  CHECK_EQ(APP_EPR_ShouldRequest(), 1u);
+}
+
 static void test_cable(void)
 {
   APP_CBL_Info_t info;
@@ -479,6 +551,7 @@ int main(void)
   test_epr_discovery();
   test_epr_power_math();
   test_epr_cli_honesty();
+  test_epr_hw_regressions();
   test_cable();
   test_cli_paths();
   printf("=== %d passed, %d failed ===\n", s_pass, s_fail);

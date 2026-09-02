@@ -28,3 +28,16 @@ USBPD_StatusTypeDef USBPD_PE_Request_EPRModeExit(uint8_t PortNum)
   (void)PortNum;
   return USBPD_OK;
 }
+
+/*
+ * Live cable identity is owned by app_cable_target.c, which pulls in the ST
+ * VDM callbacks and is target-only.  The host tests drive APP_EPR_Ctx.cable_5a
+ * directly, so this stub reports "no cable decoded yet" and lets
+ * APP_EPR_RefreshCable() run without dragging in the target file.
+ */
+#include "app_cable.h"
+
+const APP_CBL_Info_t *APP_CBL_GetLive(void)
+{
+  return NULL;
+}

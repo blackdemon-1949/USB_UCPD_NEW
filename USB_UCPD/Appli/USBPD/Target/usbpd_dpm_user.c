@@ -304,6 +304,29 @@ void USBPD_DPM_GetDataInfo(uint8_t PortNum, USBPD_CORE_DataInfoType_TypeDef Data
       (void)memcpy(Ptr, (uint8_t *)&pdp, 4U);
     }
     break;
+    /* HARDWARE-DRIVEN FIX.  EPRMode_Enter() in the prebuilt library builds the
+     * EPR_Mode(Enter) Data Object by calling GetDataInfo with DataId 0x1E
+     * (USBPD_CORE_DATATYPE_RCV_REQ_COPYPDO), then doing:
+     *
+     *   blx  GetDataInfo            ; DataId 0x1e, Ptr=sp, Size=sp+4
+     *   ldr  r0,[sp]
+     *   bfi  r5,r0,#0x10,#8         ; EPRMDO.Data   = value
+     *   bfi  r5,#1, #0x18,#8        ; EPRMDO.Action = 1 (Enter)
+     *
+     * PD3.1 Figure 6-32 requires the Data field of an Enter to be the EPR
+     * Sink Operational PDP.  This case was missing, so the switch fell to
+     * 'default: *Size = 0' and the PDP byte was never written - the board
+     * transmitted EPR_Mode(Enter) with an uninitialised Data field.  On the
+     * bench that showed up as USBPD_OK from the API followed by silence from
+     * an EPR-capable source.  Supplying the real PDP is what makes the Enter
+     * well-formed. */
+    case USBPD_CORE_DATATYPE_RCV_REQ_COPYPDO:
+    {
+      uint32_t pdp = APP_EPR_GetSinkPdpW();
+      *Size = 4U;
+      (void)memcpy(Ptr, (uint8_t *)&pdp, 4U);
+    }
+    break;
 #endif /* USBPDCORE_EPR */
 #if defined(USBPDCORE_SNK_CAPA_EXT)
     case USBPD_CORE_SNK_EXTENDED_CAPA:
@@ -339,6 +362,14 @@ void USBPD_DPM_SetDataInfo(uint8_t PortNum, USBPD_CORE_DataInfoType_TypeDef Data
     case USBPD_CORE_DATATYPE_RCV_SRC_PDO_EPR:
       APP_EPR_OnSrcPdo(Ptr, Size);
       APP_DIAG_Inc(APP_DIAG_NEG_EPR);
+      break;
+    /* The partner's EPR_Mode reply lands here as a raw EPRMDO.  Without this
+     * case an "Enter Failed" - including the reason code the source supplies,
+     * e.g. 0x01 cable not EPR capable or 0x03 EPR bit not set in the RDO -
+     * was silently discarded, leaving the CLI unable to say why entry did not
+     * complete. */
+    case USBPD_CORE_DATATYPE_EPRMODE:
+      APP_EPR_OnModeDo(Ptr, Size);
       break;
 #endif /* USBPDCORE_EPR */
     case USBPD_CORE_DATATYPE_RDO_POSITION:

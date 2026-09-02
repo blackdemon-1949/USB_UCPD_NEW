@@ -138,6 +138,10 @@ typedef struct
   uint8_t  src_epr_capable; /* source sent EPR AVS PDOs (EPR mode)     */
   uint8_t  src_spr_epr_capable; /* SPR 5V Fixed PDO had EPR-capable bit */
   uint8_t  enter_st;        /* last EPR_Mode(Enter) API status         */
+  uint8_t  enter_valid;     /* 0 = EPR_Mode(Enter) never attempted     */
+  uint8_t  getsrc_valid;    /* 0 = EPR_Get_Source_Cap never attempted  */
+  uint32_t last_mode_do;    /* raw EPRMDO last received from the partner   */
+  uint8_t  cable_5a;        /* 1 = e-marker confirmed a 5 A cable          */
   uint8_t  getsrc_pending;  /* request accepted by PE, wire outcome unknown */
   uint8_t  getsrc_txd;      /* 1 = a UCPD TX was actually observed after it */
   uint32_t getsrc_tx_at;    /* PD TX counter when the request was accepted  */
@@ -187,8 +191,12 @@ void APP_EPR_FormatAvs(uint32_t pdo, char *out, size_t outsz);
 uint32_t APP_EPR_GetSinkAvsPdo(void);
 /** EPR Sink Operational PDP in watts. */
 uint32_t APP_EPR_GetSinkPdpW(void);
+/** Refresh the 5 A cable flag from the live e-marker identity. */
+void APP_EPR_RefreshCable(void);
 /** Called from USBPD_DPM_SetDataInfo for received EPR source PDOs. */
 void APP_EPR_OnSrcPdo(const uint8_t *ptr, uint32_t size);
+/** Called from USBPD_DPM_SetDataInfo for the partner's EPR_Mode object. */
+void APP_EPR_OnModeDo(const uint8_t *ptr, uint32_t size);
 #if defined(USBPDCORE_EPR)
 USBPD_StatusTypeDef APP_EPR_RequestSrcCapa(uint8_t port);
 /** Send EPR_Mode(Enter); returns the real ST policy-engine status. */
@@ -206,6 +214,9 @@ void APP_EPR_Probe(uint8_t port, APP_EPR_Probe_t *pr);
 void APP_EPR_Diag(uint8_t port);
 /** Main-loop poll: resolve a queued request into sent / not-sent. */
 void APP_EPR_PollTx(uint8_t port);
+/** Install a minimal PD frame counter funnel when the capture engine is
+ *  compiled out, so PD TX/RX/GoodCRC counters are real in every profile. */
+void APP_EPR_InstallTraceFunnel(void);
 /** Called from APP_PD_OnNotify for the EPRMODE_* notifications. */
 void APP_EPR_OnNotify(uint32_t event);
 /** True when the local policy engine should set the RDO EPR-Mode-Capable bit. */

@@ -138,12 +138,27 @@ KeepAlive / exit be evaluated.
 USB CDC enumeration, UCPD attach, XIP boot. Nothing in these changes touches
 the DMA map, linker scripts, MPU config or USB stack.
 
-## 7. Status
+## 7. Status after the first bench run
 
-| Stage | EPR discovery |
+The first hardware run **confirmed the primary fix**: with an EPR-capable
+source attached, `epr diag` reported
+
+```
+Is_EPR_Supported_SNK: 1 (enabled)
+EPR_Get_Source_Cap : all gates PASS - API may queue
+EPR_Mode(Enter)    : all gates PASS - API may queue
+src 5V PDO EPR bit : SET (source is EPR capable)
+```
+
+All five ST gates that were previously closed are now open, and SPR
+regression was clean (5 V contract, INA226 5.020 V).
+
+It also exposed four defects, now fixed — see `EPR_FORENSIC_REPORT.md` §H.
+
+| Stage | EPR |
 |---|---|
-| RESEARCHED | **YES** — spec + ST library disassembly |
-| IMPLEMENTED | **YES** — gate opened, discovery de-circularised, entry re-sited |
-| COMPILED | **PARTIAL** — semantic/`-Wall -Wextra` clean + 133 host tests; **no ARM link** |
-| FLASHED | **NO** — no toolchain, no debug probe in sandbox |
-| HARDWARE VERIFIED | **NO** |
+| RESEARCHED | **YES** |
+| IMPLEMENTED | **YES** — gates open, entry now well-formed |
+| COMPILED | **PARTIAL** — `-Wall -Wextra` clean + 148 host tests; **no ARM link here** |
+| FLASHED | **YES (by you)** — first run done, fixes not yet re-flashed |
+| HARDWARE VERIFIED | **PARTIAL** — gates + SPR proven; EPR wire sequence still to confirm |

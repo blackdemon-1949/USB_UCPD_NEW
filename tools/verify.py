@@ -109,6 +109,9 @@ APPLI_SYMBOLS = [
     'APP_EPR_OnSprSrcCaps', 'APP_EPR_ModeEnter', 'APP_EPR_ModeExit',
     'APP_EPR_RequestSrcCapa', 'APP_EPR_Probe', 'APP_EPR_Diag',
     'APP_EPR_PollTx', 'APP_EPR_StatusName', 'APP_EPR_PowerStateName',
+    # EPR_Mode reply decoding, cable-aware PDP, and the PD frame counter
+    # funnel that replaces the capture engine in the CORE profile.
+    'APP_EPR_OnModeDo', 'APP_EPR_RefreshCable', 'APP_EPR_InstallTraceFunnel',
     'APP_CMD_Poll',
     # chunked extended-message reassembly
     'APP_EXT_Feed', 'APP_EXT_Reset', 'APP_EXT_ChunkSize',

@@ -186,6 +186,12 @@ int main(void)
   APP_LOG_Write("engines: " APP_ENG_SUMMARY "\r\n");
 #if APP_ENG_CAPTURE
   APP_PDCAP_Init();
+#else
+  /* No capture engine in this profile: install the minimal PD frame counter
+   * funnel so 'epr diag' / 'diag' report real TX/RX/GoodCRC counts instead
+   * of permanent zeros.  Must run after MX_USBPD_Init() for the same reason
+   * APP_PDCAP_Init() does - it re-registers the trace entry point. */
+  APP_EPR_InstallTraceFunnel();
 #endif
 
   /* Install the ST VDM callbacks.  USBPD_PE_Init() does not take them and

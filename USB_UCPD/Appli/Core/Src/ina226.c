@@ -62,6 +62,9 @@
  * same stale voltage/current until the module was physically power-cycled
  * (soft reset again -> one fresh conversion -> frozen again). */
 #define INA226_CFG_VALUE        0x2907U
+/* AVG | VBUSCT | VSHCT | MODE - the bits that actually configure the ADC.
+ * Bits 15..12 are reset/reserved and read back device-specifically. */
+#define INA226_CFG_OPMASK       0x0FFFU
 
 #define INA226_SHUNT_R_MOHM     5          /* 5 milli-ohm shunt            */
 #define INA226_CURRENT_LSB_UA   400        /* 0.4 mA -> cal 2560           */
@@ -73,6 +76,11 @@
 #define INA226_PROBE_PERIOD_MS  5000  /* re-probe while absent             */
 #define INA226_SAMPLE_PERIOD_MS 250   /* measurement rate                  */
 #define INA226_REPORT_PERIOD_MS 1000  /* default auto-report rate          */
+/* Idle-line suppression: only print when the reading actually moved, or on a
+ * slow heartbeat, so PD/EPR console output is not buried. */
+#define INA226_REPORT_DV_MV     50    /* print if bus voltage moved >= 50 mV */
+#define INA226_REPORT_DI_MA     20000 /* print if current moved >= 20 mA (uA) */
+#define INA226_HEARTBEAT_MS     15000 /* ...otherwise at most every 15 s     */
 #define INA226_BUS_RECOVER_N    3     /* consecutive bus errors -> reinit  */
 
 /* ---- addresses ------------------------------------------------------------ */
@@ -85,6 +93,10 @@ typedef struct
   uint8_t  present;        /* chip detected and configured                 */
   uint8_t  addr;           /* 7-bit I2C address in use                     */
   uint8_t  auto_report;    /* periodic console reporting on/off            */
+  uint8_t  printed_once;   /* a reading has been printed at least once      */
+  int32_t  last_print_mv;  /* last printed bus voltage                      */
+  int32_t  last_print_ma;  /* last printed current, in uA (matches cur_ua)  */
+  uint32_t last_print_tick;/* tick of the last printed reading              */
   uint8_t  vbus_real;      /* 1 = PD stack reads INA226 as VBUS            */
   uint32_t report_ms;      /* periodic reporting interval                  */
   int32_t  bus_mv;
@@ -247,11 +259,16 @@ static uint8_t ina_configure(void)
                    (unsigned)cfg_rd, (unsigned)INA226_CFG_VALUE);
     return 0U;
   }
-  if (cfg_rd != INA226_CFG_VALUE)
+  /* Only the low 12 bits are the operating configuration (AVG, VBUSCT,
+   * VSHCT, MODE).  Bits 15..12 are the reset bit and fixed/reserved bits
+   * whose read-back value is device dependent - on this part they read back
+   * as 0x4xxx rather than 0x2xxx.  Comparing the whole word therefore
+   * produced a scary note on a perfectly healthy device every boot, so
+   * compare only the bits that actually control conversion. */
+  if ((cfg_rd & INA226_CFG_OPMASK) != (INA226_CFG_VALUE & INA226_CFG_OPMASK))
   {
-    /* Works, but say what the chip kept: diagnostics, not an error. */
-    APP_LOG_Printf("[ina226] note: cfg reads 0x%04X (want 0x%04X), "
-                   "reserved bits differ - continuing\r\n",
+    APP_LOG_Printf("[ina226] warning: config not accepted "
+                   "(reads 0x%04X, want 0x%04X)\r\n",
                    (unsigned)cfg_rd, (unsigned)INA226_CFG_VALUE);
   }
 
@@ -381,7 +398,28 @@ void EXT_I2C_FeaturePoll(void)
       ((int32_t)(now - s.next_report) >= 0))
   {
     s.next_report = now + s.report_ms;
-    INA226_Print();
+
+    /* Suppress unchanged idle lines.  Reporting an identical "0.000 V 0.0 mA"
+     * once a second buried the PD/EPR output on the real bench console.  A
+     * reading is printed when it differs meaningfully from the last printed
+     * one, or every INA226_HEARTBEAT_MS so the reader can still see the
+     * monitor is alive. */
+    int32_t dmv = (int32_t)s.bus_mv - (int32_t)s.last_print_mv;
+    int32_t dma = (int32_t)s.cur_ua  - (int32_t)s.last_print_ma;
+
+    if (dmv < 0) { dmv = -dmv; }
+    if (dma < 0) { dma = -dma; }
+
+    if ((s.printed_once == 0U) ||
+        (dmv >= INA226_REPORT_DV_MV) || (dma >= INA226_REPORT_DI_MA) ||
+        ((int32_t)(now - s.last_print_tick) >= (int32_t)INA226_HEARTBEAT_MS))
+    {
+      s.printed_once   = 1U;
+      s.last_print_mv  = s.bus_mv;
+      s.last_print_ma  = s.cur_ua;
+      s.last_print_tick = now;
+      INA226_Print();
+    }
   }
 }
 

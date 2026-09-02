@@ -4,6 +4,7 @@
  */
 #include "app_epr.h"
 #include "app_log.h"
+#include "app_cable.h"
 #if APP_ENG_EPR
 #include "usbpd_core.h"
 #endif
@@ -15,6 +16,7 @@
 #include "usbpd_dpm_conf.h"
 #include "usbpd_dpm_core.h"
 #include "app_diag.h"
+#include "usbpd_trace.h"
 #endif
 
 #include <string.h>
@@ -189,10 +191,56 @@ uint32_t APP_EPR_GetSinkAvsPdo(void)
   return APP_EPR_BuildAvsPdo(APP_EPR_GetSinkPdpW(), lo, hi, 0u, 1u);
 }
 
+/**
+  * @brief  Refresh the 5 A cable flag from the live e-marker identity.
+  *
+  * EPR requires a cable that declares 5 A capability.  Reading it from the
+  * decoded Discover Identity keeps the advertised Sink Operational PDP tied
+  * to real hardware instead of an assumption.
+  */
+void APP_EPR_RefreshCable(void)
+{
+#if APP_ENG_CABLE_VDM
+  const APP_CBL_Info_t *cbl = APP_CBL_GetLive();
+
+  /* Only assert from a decoded identity.  A cable that has not answered
+   * Discover Identity yet must not clear a verdict already established, and
+   * must never silently upgrade the sink to 5 A. */
+  if ((cbl != NULL) && (cbl->valid != 0u))
+  {
+    APP_EPR_Ctx.cable_5a = (cbl->current_cap == APP_CBL_CUR_5A) ? 1u : 0u;
+  }
+#endif
+}
+
 uint32_t APP_EPR_GetSinkPdpW(void)
 {
-  /* PDP implied by the ceiling at 5 A, capped at the 240 W EPR maximum. */
-  uint32_t w = (APP_EPR_Ctx.ceiling_mv / 1000u) * 5u;
+  /* EPR Sink Operational PDP, in watts, as sent in EPR_Mode(Enter).
+   *
+   * This must describe what the sink will actually draw, not an aspiration.
+   * The previous form assumed 5 A unconditionally and reported 140 W at the
+   * 28 V ceiling even when attached through a 3 A cable to a 100 W source -
+   * an overstated capability, and exactly the kind of fabricated number that
+   * must not go on the wire.  Cap by the current the cable is rated for. */
+  uint32_t ma = APP_EPR_Ctx.want_ma;
+  uint32_t w;
+
+  if (ma == 0u)
+  {
+    ma = 5000u;
+  }
+  /* An e-marked 5 A cable is required for EPR; without a confirmed 5 A
+   * marking assume the 3 A default the Type-C spec guarantees.  The flag is
+   * refreshed from the live Discover Identity result, so this tracks the
+   * cable actually plugged in rather than a build-time assumption. */
+  APP_EPR_RefreshCable();
+  if (APP_EPR_Ctx.cable_5a == 0u)
+  {
+    if (ma > 3000u) { ma = 3000u; }
+  }
+  if (ma > 5000u) { ma = 5000u; }
+
+  w = ((APP_EPR_Ctx.ceiling_mv / 1000u) * ma) / 1000u;
   return (w > 240u) ? 240u : w;
 }
 
@@ -372,6 +420,7 @@ USBPD_StatusTypeDef APP_EPR_RequestSrcCapa(uint8_t port)
   st = USBPD_PE_Send_ExtendeControlMessage(port,
                                            USBPD_EXTENDED_CONTROL_EPR_GETSRCCAPA);
   APP_EPR_Ctx.getsrc_st = (uint8_t)st;
+  APP_EPR_Ctx.getsrc_valid = 1u;
   APP_EPR_Ctx.getsrc_tx_at = (uint32_t)before.pd_tx;
   APP_EPR_Ctx.getsrc_pending = (uint8_t)((st == USBPD_OK) ? 1u : 0u);
 
@@ -389,6 +438,7 @@ USBPD_StatusTypeDef APP_EPR_ModeEnter(uint8_t port)
 {
   USBPD_StatusTypeDef st = USBPD_PE_Request_EPRModeEnter(port);
   APP_EPR_Ctx.enter_st = (uint8_t)st;
+  APP_EPR_Ctx.enter_valid = 1u;
   APP_EPR_Ctx.enter_req_st = (uint8_t)st;
   APP_LOG_Printf("EPR_Mode(Enter): API status = %s (%d)%s\r\n",
                  APP_EPR_StatusName(st), (int)st,
@@ -538,6 +588,68 @@ void APP_EPR_OnSrcPdo(const uint8_t *ptr, uint32_t size)
     (void)APP_EPR_ModeEnter(0u);
   }
 #endif
+}
+
+/**
+  * @brief  Record the partner's EPR_Mode Data Object (EPRMDO).
+  *
+  * PD3.1 Figure 6-32: B31..24 Action, B23..16 Data.  For "Enter Failed" the
+  * Data byte is the reason code, which is the single most useful piece of
+  * evidence when entry does not complete.  Without this the CLI could only
+  * say "not entered" and not why.
+  */
+void APP_EPR_OnModeDo(const uint8_t *ptr, uint32_t size)
+{
+  uint32_t do32;
+  uint8_t  action;
+  uint8_t  data;
+
+  if ((ptr == NULL) || (size < 4u))
+  {
+    return;
+  }
+
+  do32 = (uint32_t)ptr[0] | ((uint32_t)ptr[1] << 8) |
+         ((uint32_t)ptr[2] << 16) | ((uint32_t)ptr[3] << 24);
+
+  action = (uint8_t)((do32 >> 24) & 0xFFu);
+  data   = (uint8_t)((do32 >> 16) & 0xFFu);
+
+  APP_EPR_Ctx.last_action = action;
+  APP_EPR_Ctx.last_mode_do = do32;
+
+  switch (action)
+  {
+    case APP_EPR_ACT_ENTER_FAILED:
+      APP_EPR_Ctx.last_error  = data;
+      APP_EPR_Ctx.error_valid = 1u;
+      APP_EPR_Ctx.entered     = 0u;
+      APP_EPR_Ctx.mode        = 0u;
+      APP_LOG_Printf("EPR_Mode: source replied Enter Failed - %s (0x%02X)\r\n",
+                     APP_EPR_ErrorName(data), (unsigned)data);
+      break;
+
+    case APP_EPR_ACT_ENTER_ACK:
+      APP_LOG_Write("EPR_Mode: source replied Enter Acknowledged\r\n");
+      break;
+
+    case APP_EPR_ACT_ENTER_SUCCEEDED:
+      APP_EPR_Ctx.entered = 1u;
+      APP_EPR_Ctx.mode    = 1u;
+      APP_LOG_Write("EPR_Mode: source replied Enter Succeeded - EPR mode active\r\n");
+      break;
+
+    case APP_EPR_ACT_EXIT:
+      APP_EPR_Ctx.entered = 0u;
+      APP_EPR_Ctx.mode    = 0u;
+      APP_LOG_Write("EPR_Mode: EPR mode exited\r\n");
+      break;
+
+    default:
+      APP_LOG_Printf("EPR_Mode: action 0x%02X data 0x%02X\r\n",
+                     (unsigned)action, (unsigned)data);
+      break;
+  }
 }
 
 void APP_EPR_OnNotify(uint32_t event)
@@ -727,10 +839,21 @@ int APP_EPR_Cmd(int argc, char *argv[])
                      : "none received yet");
     APP_LOG_Printf("  RDO B21 EPR_Capable: %s\r\n",
                    APP_EPR_ShouldRequest() ? "will be set" : "will be clear");
+    /* 0 is USBPD_OK, so an untouched field would read as a success that
+     * never happened.  Report "not attempted" until a call really occurred. */
     APP_LOG_Printf("  last Enter status  : %s\r\n",
-                   APP_EPR_StatusName((int)APP_EPR_Ctx.enter_st));
+                   APP_EPR_Ctx.enter_valid
+                     ? APP_EPR_StatusName((int)APP_EPR_Ctx.enter_st)
+                     : "not attempted");
     APP_LOG_Printf("  last GetSrcCap st  : %s\r\n",
-                   APP_EPR_StatusName((int)APP_EPR_Ctx.getsrc_st));
+                   APP_EPR_Ctx.getsrc_valid
+                     ? APP_EPR_StatusName((int)APP_EPR_Ctx.getsrc_st)
+                     : "not attempted");
+    APP_LOG_Printf("  EPR_Get_SrcCap wire: %s\r\n",
+                   (APP_EPR_Ctx.getsrc_valid == 0u) ? "not attempted"
+                     : (APP_EPR_Ctx.getsrc_pending ? "queued, awaiting TX"
+                        : (APP_EPR_Ctx.getsrc_txd ? "UCPD TX observed"
+                                                  : "queued but NO TX seen")));
     APP_LOG_Printf("  mode       : %s\r\n", APP_EPR_Ctx.mode ? "EPR" : "SPR");
     APP_LOG_Printf("  verdict    : %s\r\n",
                    (APP_EPR_Ctx.src_spr_epr_capable || APP_EPR_Ctx.src_epr_capable)
@@ -758,8 +881,12 @@ int APP_EPR_Cmd(int argc, char *argv[])
       APP_LOG_Printf("   [%lu] 0x%08lX  %s\r\n", (unsigned long)i,
                      (unsigned long)APP_EPR_Ctx.src_avs[i], line);
     }
+    /* last_action 0 is not a real EPR action; it means the partner has not
+     * sent an EPR_Mode message yet.  "RESERVED" was misleading. */
     APP_LOG_Printf("  last action: %s\r\n",
-                   APP_EPR_ActionName(APP_EPR_Ctx.last_action));
+                   (APP_EPR_Ctx.last_action == 0u)
+                     ? "none (no EPR_Mode message exchanged)"
+                     : APP_EPR_ActionName(APP_EPR_Ctx.last_action));
     if (APP_EPR_Ctx.error_valid != 0u)
     {
       APP_LOG_Printf("  last error : %s\r\n",
@@ -773,3 +900,66 @@ int APP_EPR_Cmd(int argc, char *argv[])
   }
   return 1;
 }
+
+/* ------------------------------------------------------------------ */
+/* Minimal PD frame counter funnel                                     */
+/*                                                                     */
+/* HARDWARE-DRIVEN FIX.  On a real board the boundary probe reported    */
+/*   PD TX frames : 0 / PD RX frames : 0 / GoodCRC RX : 0              */
+/* even while SPR negotiation was demonstrably working (source caps     */
+/* received, Request accepted, 5 V explicit contract, INA226 showing    */
+/* 5.020 V).  The counters were not merely wrong, they were dead:       */
+/* APP_DIAG_PD_TX/RX are incremented only inside APP_PDCAP_Trace(),     */
+/* which lives behind APP_ENG_CAPTURE.  The shipped CORE profile builds */
+/* with cap=0, so that trace funnel is never installed and nothing ever */
+/* fed those counters.                                                  */
+/*                                                                     */
+/* Counting PD frames must not depend on the optional analyzer, so this */
+/* funnel is registered whenever the capture engine is absent.  It does */
+/* nothing but bump counters and chain to the stock TRACER_EMB path, so */
+/* the CubeMonitor-UCPD trace stream is unaffected.                     */
+/* ------------------------------------------------------------------ */
+#if defined(APP_EPR_TARGET_PROBE) && !APP_ENG_CAPTURE && defined(_TRACE)
+
+static void epr_trace_funnel(TRACE_EVENT type, uint8_t port, uint8_t sop,
+                             uint8_t *ptr, uint32_t size)
+{
+  if (type == USBPD_TRACE_MESSAGE_OUT)
+  {
+    APP_DIAG_Inc(APP_DIAG_PD_TX);
+  }
+  else if (type == USBPD_TRACE_MESSAGE_IN)
+  {
+    APP_DIAG_Inc(APP_DIAG_PD_RX);
+
+    /* A GoodCRC is a 2-byte header with no data objects and message type 1
+     * in the control-message space.  Counting it here is what lets the CLI
+     * distinguish "transmitted" from "acknowledged by the partner". */
+    if ((ptr != NULL) && (size >= 2u))
+    {
+      uint16_t hdr = (uint16_t)((uint16_t)ptr[0] | ((uint16_t)ptr[1] << 8));
+      uint16_t ndo = (uint16_t)((hdr >> 12) & 0x7u);
+      uint16_t mtype = (uint16_t)(hdr & 0x1Fu);
+
+      if ((ndo == 0u) && (mtype == 1u))
+      {
+        APP_DIAG_Inc(APP_DIAG_PD_GOODCRC_RX);
+      }
+    }
+  }
+
+  USBPD_TRACE_Add(type, port, sop, ptr, size);
+}
+
+void APP_EPR_InstallTraceFunnel(void)
+{
+  USBPD_PE_SetTrace(epr_trace_funnel, 3u);
+}
+
+#else /* capture engine owns the funnel, or no trace at all */
+
+void APP_EPR_InstallTraceFunnel(void)
+{
+}
+
+#endif
