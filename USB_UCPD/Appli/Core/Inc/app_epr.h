@@ -87,6 +87,7 @@ typedef struct
 
   uint8_t  src_epr_capable; /* source advertised EPR capability        */
   uint8_t  enter_req_st;    /* last USBPD_PE_Request_EPRModeEnter() status */
+  uint8_t  getsrc_st;       /* last EPR_Get_Source_Cap request status      */
   uint8_t  n_src_avs;       /* number of EPR AVS PDOs received         */
   uint32_t src_avs[7];      /* received EPR source AVS PDOs            */
   uint32_t src_min_mv;      /* widest offered window                   */
@@ -131,6 +132,9 @@ uint32_t APP_EPR_GetSinkAvsPdo(void);
 uint32_t APP_EPR_GetSinkPdpW(void);
 /** Called from USBPD_DPM_SetDataInfo for received EPR source PDOs. */
 void APP_EPR_OnSrcPdo(const uint8_t *ptr, uint32_t size);
+#if defined(USBPDCORE_EPR)
+USBPD_StatusTypeDef APP_EPR_RequestSrcCapa(uint8_t port);
+#endif
 /** Called from APP_PD_OnNotify for the EPRMODE_* notifications. */
 void APP_EPR_OnNotify(uint32_t event);
 /** True when the local policy engine should set the RDO EPR-Mode-Capable bit. */

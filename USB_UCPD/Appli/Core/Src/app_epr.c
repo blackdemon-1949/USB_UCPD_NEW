@@ -187,6 +187,31 @@ uint32_t APP_EPR_GetSinkPdpW(void)
   return (w > 240u) ? 240u : w;
 }
 
+#if defined(USBPDCORE_EPR)
+/**
+  * @brief  Actively ask the connected source for its EPR Source Capabilities.
+  *
+  * THIS IS THE PIECE THAT WAS MISSING.  An SPR source does not put AVS PDOs in
+  * its normal Source_Capabilities, so a sink that only inspects the cached
+  * SPR capabilities can never learn that the partner supports EPR.  PD 3.1
+  * discovery is initiated by the SINK sending the EPR_Get_Source_Cap extended
+  * control message (USBPD_EXTENDED_CONTROL_EPR_GETSRCCAPA = 1,
+  * usbpd_def.h:1361) via USBPD_PE_Send_ExtendeControlMessage()
+  * (usbpd_core.h, declared under #if defined(USBPDCORE_EPR)).
+  *
+  * @retval USBPD_StatusTypeDef from the ST policy engine.
+  */
+USBPD_StatusTypeDef APP_EPR_RequestSrcCapa(uint8_t port)
+{
+  USBPD_StatusTypeDef st;
+  st = USBPD_PE_Send_ExtendeControlMessage(port,
+                                           USBPD_EXTENDED_CONTROL_EPR_GETSRCCAPA);
+  APP_EPR_Ctx.getsrc_st = (uint8_t)st;
+  APP_LOG_Printf("EPR: sent EPR_Get_Source_Cap (st=%d)\r\n", (int)st);
+  return st;
+}
+#endif /* USBPDCORE_EPR */
+
 void APP_EPR_OnSrcPdo(const uint8_t *ptr, uint32_t size)
 {
   uint32_t n = size / 4u;
@@ -249,6 +274,7 @@ void APP_EPR_OnSrcPdo(const uint8_t *ptr, uint32_t size)
       (APP_EPR_Ctx.enable != 0u) &&
       (APP_EPR_Ctx.mode == 0u))
   {
+    /* Source already told us it has AVS PDOs: go straight to mode entry. */
     USBPD_StatusTypeDef st = USBPD_PE_Request_EPRModeEnter(0u);
     APP_EPR_Ctx.enter_req_st = (uint8_t)st;
     APP_LOG_Printf("EPR: source advertises AVS -> requested EPR mode entry (st=%d)\r\n",
@@ -348,6 +374,22 @@ int APP_EPR_Cmd(int argc, char *argv[])
     APP_EPR_Ctx.enable = 0u;
     APP_LOG_Write("EPR disabled - SPR/PPS only\r\n");
   }
+#if defined(USBPDCORE_EPR)
+  else if (strcmp(argv[1], "request") == 0)
+  {
+    /* Actively start PD3.1 EPR discovery instead of waiting passively.
+     * Step 1: ask the source for EPR Source Capabilities. */
+    APP_EPR_Ctx.enable = 1u;
+    (void)APP_EPR_RequestSrcCapa(0u);
+  }
+  else if (strcmp(argv[1], "enter") == 0)
+  {
+    /* Step 2 (manual): ask the policy engine to enter EPR mode. */
+    USBPD_StatusTypeDef st = USBPD_PE_Request_EPRModeEnter(0u);
+    APP_EPR_Ctx.enter_req_st = (uint8_t)st;
+    APP_LOG_Printf("EPR mode entry requested (st=%d)\r\n", (int)st);
+  }
+#endif
   else if ((strcmp(argv[1], "ceiling") == 0) && (argc >= 3))
   {
     if ((v < APP_EPR_MIN_MV) || (v > APP_EPR_MAX_MV))
