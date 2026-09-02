@@ -33,6 +33,13 @@ extern "C" {
 #include <stddef.h>
 #include "app_engines.h"
 
+/* The boundary probe reads DPM_Settings/DPM_Params and the diagnostic
+ * counters, which only exist in the firmware.  Host tests define
+ * APP_EPR_HOSTTEST to compile the probe as a neutral stub. */
+#if !defined(APP_EPR_HOSTTEST)
+#define APP_EPR_TARGET_PROBE 1
+#endif
+
 /* AVS PDO field accessors */
 #define APP_EPR_AVS_PDP_W(p)      ((uint32_t)((p) & 0xFFu))
 #define APP_EPR_AVS_MIN_MV(p)     ((uint32_t)(((p) >> 8) & 0xFFu) * 100u)
@@ -82,6 +89,45 @@ extern "C" {
 /* PD3.1: EPR Mode Capable bit in the first (5 V Fixed) Source PDO, B23. */
 #define APP_EPR_SRC_FIXED_EPR_CAPABLE  (1u << 23)
 
+/** Max main-loop polls to wait for a queued EPR request to reach the wire. */
+#define APP_EPR_TX_POLL_LIMIT   200u
+
+/**
+  * @brief Snapshot of every precondition the ST core library actually tests,
+  *        plus the layer counters, taken at one instant.
+  *
+  * Field names map 1:1 onto the decoded gates so a CLI report can attribute a
+  * refusal to a specific instruction in the shipped library.
+  */
+typedef struct
+{
+  uint32_t params_word;     /* raw DPM_Params word the library dereferences */
+  uint16_t pd3_support;     /* raw DPM_Settings.PE_PD3_Support              */
+
+  uint8_t  spec_rev;        /* Params b1..0  : 2 = REV3                     */
+  uint8_t  power_role;      /* Params b2     : 0 = SNK                      */
+  uint8_t  pe_power;        /* Params b10..8 : 3 = EXPLICITCONTRACT         */
+  uint8_t  is_connected;    /* Params b12                                   */
+  uint8_t  power_range;     /* Params b29    : 1 = EPR mode active          */
+  uint8_t  epr_snk_flag;    /* PD3_Support b11 Is_EPR_Supported_SNK         */
+  uint8_t  epr_src_flag;    /* PD3_Support b12 Is_EPR_Supported_SRC         */
+
+  uint8_t  g_connected;     /* individual gate verdicts                     */
+  uint8_t  g_explicit;
+  uint8_t  g_sink_role;
+  uint8_t  g_rev3;
+  uint8_t  g_epr_flag;
+
+  uint8_t  extctrl_ok;      /* 1 = EPR_Get_Source_Cap may queue             */
+  uint8_t  modeenter_ok;    /* 1 = EPR_Mode(Enter) may queue                */
+
+  uint32_t pd_tx;           /* layer counters at snapshot time              */
+  uint32_t pd_rx;
+  uint32_t goodcrc_rx;
+  uint32_t prot_err;
+  uint32_t timeouts;
+} APP_EPR_Probe_t;
+
 typedef struct
 {
   uint8_t  enable;          /* user-controlled EPR enable              */
@@ -92,6 +138,11 @@ typedef struct
   uint8_t  src_epr_capable; /* source sent EPR AVS PDOs (EPR mode)     */
   uint8_t  src_spr_epr_capable; /* SPR 5V Fixed PDO had EPR-capable bit */
   uint8_t  enter_st;        /* last EPR_Mode(Enter) API status         */
+  uint8_t  getsrc_pending;  /* request accepted by PE, wire outcome unknown */
+  uint8_t  getsrc_txd;      /* 1 = a UCPD TX was actually observed after it */
+  uint32_t getsrc_tx_at;    /* PD TX counter when the request was accepted  */
+  uint32_t getsrc_poll;     /* poll iterations spent waiting for that TX    */
+  APP_EPR_Probe_t probe;    /* gate state captured at the last request      */
   uint8_t  enter_req_st;    /* last USBPD_PE_Request_EPRModeEnter() status */
   uint8_t  getsrc_st;       /* last EPR_Get_Source_Cap request status      */
   uint8_t  n_src_avs;       /* number of EPR AVS PDOs received         */
@@ -147,6 +198,14 @@ USBPD_StatusTypeDef APP_EPR_ModeExit(uint8_t port);
 #endif
 /** Human-readable USBPD_StatusTypeDef, for honest CLI reporting. */
 const char *APP_EPR_StatusName(int st);
+/** Human-readable PE_Power contract state. */
+const char *APP_EPR_PowerStateName(uint8_t pe_power);
+/** Capture every ST precondition and layer counter at this instant. */
+void APP_EPR_Probe(uint8_t port, APP_EPR_Probe_t *pr);
+/** Print the full PE/PRL/UCPD boundary report ('epr diag'). */
+void APP_EPR_Diag(uint8_t port);
+/** Main-loop poll: resolve a queued request into sent / not-sent. */
+void APP_EPR_PollTx(uint8_t port);
 /** Called from APP_PD_OnNotify for the EPRMODE_* notifications. */
 void APP_EPR_OnNotify(uint32_t event);
 /** True when the local policy engine should set the RDO EPR-Mode-Capable bit. */

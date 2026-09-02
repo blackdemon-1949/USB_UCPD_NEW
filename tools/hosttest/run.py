@@ -49,7 +49,7 @@ SUITES = [
 
 # The same core defines the Appli target build uses, so the ST headers select
 # identical struct layouts and feature guards on host and target.
-DEFS = ['-DUSBPDCORE_LIB_PD3_FULL', '-DUSBPD_PORT_COUNT=1']
+DEFS = ['-DUSBPDCORE_LIB_PD3_FULL', '-DUSBPD_PORT_COUNT=1', '-DAPP_EPR_HOSTTEST']
 
 CFLAGS = ['-std=c99', '-Wall', '-Wextra', '-Werror', '-Wshadow',
           '-Wconversion', '-O2', '-g', '-fsanitize=address,undefined',

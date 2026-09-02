@@ -213,6 +213,10 @@ void APP_PD_Task(void)
   }
 
 #if APP_ENG_EPR && defined(USBPDCORE_EPR)
+  /* Resolve any queued EPR request into a real wire outcome (sent / not
+   * sent).  This is what turns "the PE accepted it" into evidence. */
+  APP_EPR_PollTx(0U);
+
   /* Automatic EPR mode entry.
    *
    * PD3.1 6.4.10.1 requires that, at the moment EPR_Mode(Enter) is sent:

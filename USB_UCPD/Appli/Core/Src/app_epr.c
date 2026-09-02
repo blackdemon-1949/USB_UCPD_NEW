@@ -7,6 +7,15 @@
 #if APP_ENG_EPR
 #include "usbpd_core.h"
 #endif
+/* The boundary probe reads the same two structures the ST library
+ * dereferences (DPM_Settings for the EPR gate, DPM_Params for the contract
+ * state) and the diagnostic counters fed by the trace funnel.  Host builds
+ * have no PD stack, so the probe compiles only for the target. */
+#if defined(APP_EPR_TARGET_PROBE)
+#include "usbpd_dpm_conf.h"
+#include "usbpd_dpm_core.h"
+#include "app_diag.h"
+#endif
 
 #include <string.h>
 #include <stdio.h>
@@ -201,18 +210,178 @@ uint32_t APP_EPR_GetSinkPdpW(void)
   *
   * @retval USBPD_StatusTypeDef from the ST policy engine.
   */
+/* ------------------------------------------------------------------ */
+/* EPR boundary probe                                                  */
+/*                                                                     */
+/* Evaluates every precondition the ST library actually tests, then    */
+/* measures what crossed each layer.  The gate list is not guesswork:  */
+/* it is decoded from the shipped PD3_FULL core library.               */
+/*                                                                     */
+/*   USBPD_PE_Send_ExtendeControlMessage (usbpd_pe.o +0x682)           */
+/*     ldrb r2,[r5,#0xa]      ctx+0x26a  AMS/request slot must be 0    */
+/*     ubfx r2,r6,#0xc,#1     Params bit12  PE_IsConnected             */
+/*     ubfx r2,r6,#8,#3       PE_Power, must be 3 (EXPLICITCONTRACT)   */
+/*     ubfx r1,r6,#2,#1       PE_PowerRole, must be 0 (SNK)            */
+/*     ldrh r2,[r1,#8]; ubfx #0xb,#1   Is_EPR_Supported_SNK            */
+/*                                                                     */
+/*   USBPD_PE_Request_EPRModeEnter (usbpd_pe.o +0x48e)                 */
+/*     same connect gate, then (Params & 0x704) == 0x300               */
+/*     and PE_SpecRevision >= 2 (REV3)                                 */
+/* ------------------------------------------------------------------ */
+
+void APP_EPR_Probe(uint8_t port, APP_EPR_Probe_t *pr)
+{
+  uint32_t w;
+
+  if (pr == NULL)
+  {
+    return;
+  }
+  memset(pr, 0, sizeof(*pr));
+
+#if defined(APP_EPR_TARGET_PROBE)
+  if (port >= USBPD_PORT_COUNT)
+  {
+    return;
+  }
+
+  /* Snapshot the live Params word the library itself dereferences. */
+  memcpy(&w, &DPM_Params[port], sizeof(w));
+  pr->params_word   = w;
+  pr->pd3_support   = DPM_Settings[port].PE_PD3_Support.PD3_Support;
+
+  pr->spec_rev      = (uint8_t)(w & 0x3u);
+  pr->power_role    = (uint8_t)((w >> 2) & 0x1u);
+  pr->pe_power      = (uint8_t)((w >> 8) & 0x7u);
+  pr->is_connected  = (uint8_t)((w >> 12) & 0x1u);
+  pr->power_range   = (uint8_t)((w >> 29) & 0x1u);
+  pr->epr_snk_flag  = (uint8_t)((pr->pd3_support >> 11) & 0x1u);
+  pr->epr_src_flag  = (uint8_t)((pr->pd3_support >> 12) & 0x1u);
+
+  /* Individual gate verdicts, in the order the library evaluates them. */
+  pr->g_connected   = pr->is_connected;
+  pr->g_explicit    = (pr->pe_power == 3u) ? 1u : 0u;
+  pr->g_sink_role   = (pr->power_role == 0u) ? 1u : 0u;
+  pr->g_rev3        = (pr->spec_rev >= 2u) ? 1u : 0u;
+  pr->g_epr_flag    = pr->epr_snk_flag;
+
+  pr->extctrl_ok    = (uint8_t)(pr->g_connected & pr->g_explicit &
+                                pr->g_sink_role & pr->g_epr_flag);
+  /* EPRModeEnter does NOT test the EPR flag; it tests (w & 0x704)==0x300. */
+  pr->modeenter_ok  = (uint8_t)((((w & 0x704u) == 0x300u) ? 1u : 0u) & pr->g_rev3);
+
+  /* Layer counters, sampled so a caller can diff them across a request. */
+  pr->pd_tx         = APP_DIAG_Get(APP_DIAG_PD_TX);
+  pr->pd_rx         = APP_DIAG_Get(APP_DIAG_PD_RX);
+  pr->goodcrc_rx    = APP_DIAG_Get(APP_DIAG_PD_GOODCRC_RX);
+  pr->prot_err      = APP_DIAG_Get(APP_DIAG_PD_PROTOCOL_ERR);
+  pr->timeouts      = APP_DIAG_Get(APP_DIAG_PD_TIMEOUT);
+#else
+  (void)port;
+  (void)w;
+#endif /* APP_EPR_TARGET_PROBE */
+}
+
+const char *APP_EPR_PowerStateName(uint8_t pe_power)
+{
+  switch (pe_power)
+  {
+    case 0u: return "NO CONTRACT";
+    case 1u: return "DEFAULT 5V";
+    case 2u: return "IMPLICIT CONTRACT";
+    case 3u: return "EXPLICIT CONTRACT";
+    case 4u: return "TRANSITION";
+    default: return "reserved";
+  }
+}
+
+/**
+  * @brief  Print the full PE/PRL/UCPD boundary state for one EPR request.
+  *
+  * Reports the four things that are routinely conflated: whether the API was
+  * even allowed to run, whether the stack accepted it, whether a frame left
+  * the UCPD transmitter, and whether the partner acknowledged it.  A pass at
+  * one layer is never reported as a pass at the next.
+  */
+void APP_EPR_Diag(uint8_t port)
+{
+  APP_EPR_Probe_t pr;
+
+  APP_EPR_Probe(port, &pr);
+
+  APP_LOG_Write("EPR boundary probe\r\n");
+  APP_LOG_Printf("  DPM_Params word    : 0x%08lX\r\n", (unsigned long)pr.params_word);
+  APP_LOG_Printf("  PD3_Support        : 0x%04X\r\n", (unsigned)pr.pd3_support);
+  APP_LOG_Write("  -- runtime state --\r\n");
+  APP_LOG_Printf("  PE connected       : %s\r\n", pr.is_connected ? "yes" : "NO");
+  APP_LOG_Printf("  power role         : %s\r\n", pr.power_role ? "SRC" : "SNK");
+  APP_LOG_Printf("  contract           : %s\r\n", APP_EPR_PowerStateName(pr.pe_power));
+  APP_LOG_Printf("  spec revision      : %s\r\n",
+                 (pr.spec_rev >= 2u) ? "PD3" : "PD2 (too old for EPR)");
+  APP_LOG_Printf("  power range        : %s\r\n", pr.power_range ? "EPR" : "SPR");
+  APP_LOG_Printf("  Is_EPR_Supported_SNK: %s\r\n", pr.epr_snk_flag ? "1 (enabled)" : "0 (GATE CLOSED)");
+  APP_LOG_Write("  -- ST library gates --\r\n");
+  APP_LOG_Printf("  EPR_Get_Source_Cap : %s\r\n",
+                 pr.extctrl_ok ? "all gates PASS - API may queue"
+                               : "BLOCKED before any message is built");
+  if (pr.extctrl_ok == 0u)
+  {
+    APP_LOG_Printf("    connected=%u explicit=%u sink=%u eprflag=%u\r\n",
+                   (unsigned)pr.g_connected, (unsigned)pr.g_explicit,
+                   (unsigned)pr.g_sink_role, (unsigned)pr.g_epr_flag);
+  }
+  APP_LOG_Printf("  EPR_Mode(Enter)    : %s\r\n",
+                 pr.modeenter_ok ? "all gates PASS - API may queue"
+                                 : "BLOCKED ((Params&0x704)!=0x300 or not PD3)");
+  APP_LOG_Write("  -- layer counters (cumulative) --\r\n");
+  APP_LOG_Printf("  PD TX frames       : %lu\r\n", (unsigned long)pr.pd_tx);
+  APP_LOG_Printf("  PD RX frames       : %lu\r\n", (unsigned long)pr.pd_rx);
+  APP_LOG_Printf("  GoodCRC RX         : %lu\r\n", (unsigned long)pr.goodcrc_rx);
+  APP_LOG_Printf("  protocol errors    : %lu\r\n", (unsigned long)pr.prot_err);
+  APP_LOG_Printf("  timeouts           : %lu\r\n", (unsigned long)pr.timeouts);
+}
+
 USBPD_StatusTypeDef APP_EPR_RequestSrcCapa(uint8_t port)
 {
   USBPD_StatusTypeDef st;
+  APP_EPR_Probe_t before;
+
+  /* Record the exact gate state the library is about to evaluate, so a
+   * refusal can be attributed to a specific precondition rather than
+   * guessed at. */
+  APP_EPR_Probe(port, &before);
+  APP_EPR_Ctx.probe = before;
+
+  APP_LOG_Printf("EPR_Get_Source_Cap: entered, PE %s / %s / %s, EPRflag=%u\r\n",
+                 before.is_connected ? "connected" : "NOT-connected",
+                 before.power_role ? "SRC" : "SNK",
+                 APP_EPR_PowerStateName(before.pe_power),
+                 (unsigned)before.epr_snk_flag);
+
+  if (before.extctrl_ok == 0u)
+  {
+    /* The library would return without building a message.  Say so plainly
+     * instead of calling the API and reporting a misleading status. */
+    APP_LOG_Printf("EPR_Get_Source_Cap: BLOCKED by ST gate "
+                   "(connected=%u explicit=%u sink=%u eprflag=%u) - "
+                   "no message will be built\r\n",
+                   (unsigned)before.g_connected, (unsigned)before.g_explicit,
+                   (unsigned)before.g_sink_role, (unsigned)before.g_epr_flag);
+  }
+
   st = USBPD_PE_Send_ExtendeControlMessage(port,
                                            USBPD_EXTENDED_CONTROL_EPR_GETSRCCAPA);
   APP_EPR_Ctx.getsrc_st = (uint8_t)st;
-  /* Report what the stack actually did, never "sent".  USBPD_OK here means
-   * the request was POSTED to the PE; the message only reaches CC if the PE
-   * is in an interruptible READY state with an explicit contract. */
+  APP_EPR_Ctx.getsrc_tx_at = (uint32_t)before.pd_tx;
+  APP_EPR_Ctx.getsrc_pending = (uint8_t)((st == USBPD_OK) ? 1u : 0u);
+
+  /* "queued" is NOT "sent".  USBPD_OK means the PE accepted the request into
+   * its AMS slot; the frame only exists on CC once the PD TX counter moves
+   * and a GoodCRC comes back.  APP_EPR_PollTx() reports that separately. */
   APP_LOG_Printf("EPR_Get_Source_Cap: API status = %s (%d)%s\r\n",
                  APP_EPR_StatusName(st), (int)st,
-                 (st == USBPD_OK) ? " -> queued to PE" : " -> NOT queued");
+                 (st == USBPD_OK) ? " -> ACCEPTED into PE AMS slot (queued, NOT yet sent)"
+                                  : " -> REJECTED, nothing queued");
   return st;
 }
 
@@ -247,6 +416,60 @@ const char *APP_EPR_StatusName(int st)
     case 3:  return "USBPD_BUSY (not connected / no SPR explicit contract yet)";
     case 4:  return "USBPD_TIMEOUT";
     default: return "unknown";
+  }
+}
+
+/**
+  * @brief  Resolve a pending EPR request into a real wire outcome.
+  *
+  * Called from the main loop.  Distinguishes the four layers that the CLI
+  * must never conflate:
+  *   queued  - PE accepted the request (API returned USBPD_OK)
+  *   sent    - the PD TX counter advanced, so UCPD actually transmitted
+  *   acked   - a GoodCRC came back, so the partner received it
+  *   answered- an EPR_Source_Capabilities arrived
+  */
+void APP_EPR_PollTx(uint8_t port)
+{
+  uint32_t tx_now;
+  uint32_t crc_now;
+
+  if (APP_EPR_Ctx.getsrc_pending == 0u)
+  {
+    return;
+  }
+  if (port >= USBPD_PORT_COUNT)
+  {
+    return;
+  }
+
+#if defined(APP_EPR_TARGET_PROBE)
+  tx_now  = APP_DIAG_Get(APP_DIAG_PD_TX);
+  crc_now = APP_DIAG_Get(APP_DIAG_PD_GOODCRC_RX);
+#else
+  tx_now = 0u; crc_now = 0u;
+#endif
+
+  if (tx_now != APP_EPR_Ctx.getsrc_tx_at)
+  {
+    APP_EPR_Ctx.getsrc_pending = 0u;
+    APP_EPR_Ctx.getsrc_txd = 1u;
+    APP_LOG_Printf("EPR_Get_Source_Cap: UCPD TX observed (PD TX %lu -> %lu), "
+                   "GoodCRC RX total %lu\r\n",
+                   (unsigned long)APP_EPR_Ctx.getsrc_tx_at,
+                   (unsigned long)tx_now, (unsigned long)crc_now);
+    return;
+  }
+
+  /* No TX within the AMS window: the request was accepted by the PE but the
+   * frame never reached the wire.  That is a distinct failure from a
+   * rejected API call and must be reported as such. */
+  if (APP_EPR_Ctx.getsrc_poll++ > APP_EPR_TX_POLL_LIMIT)
+  {
+    APP_EPR_Ctx.getsrc_pending = 0u;
+    APP_EPR_Ctx.getsrc_txd = 0u;
+    APP_LOG_Write("EPR_Get_Source_Cap: accepted by PE but NO UCPD TX observed "
+                  "- blocked between PE and PRL\r\n");
   }
 }
 
@@ -422,7 +645,7 @@ int APP_EPR_Cmd(int argc, char *argv[])
   {
     if (sscanf(argv[2], "%u", &v) != 1)
     {
-      APP_LOG_Write("usage: epr [on|off|caps|enter|exit|request|ceiling <mv>|want <mv>|status]\r\n");
+      APP_LOG_Write("usage: epr [on|off|caps|enter|exit|request|diag|ceiling <mv>|want <mv>|status]\r\n");
       return 1;
     }
   }
@@ -463,6 +686,10 @@ int APP_EPR_Cmd(int argc, char *argv[])
   else if (strcmp(argv[1], "caps") == 0)
   {
     (void)APP_EPR_RequestSrcCapa(0u);
+  }
+  else if (strcmp(argv[1], "diag") == 0)
+  {
+    APP_EPR_Diag(0u);
   }
 #endif
   else if ((strcmp(argv[1], "ceiling") == 0) && (argc >= 3))

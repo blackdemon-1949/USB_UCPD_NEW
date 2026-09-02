@@ -102,6 +102,13 @@ APPLI_SYMBOLS = [
     # EPR operational surface
     'APP_EPR_ShouldRequest', 'APP_EPR_GetSinkPdpW', 'APP_EPR_ClampRequest',
     'APP_EPR_IsAvsPdo', 'APP_EPR_ActionName', 'APP_EPR_ErrorName',
+    # EPR PD3.1 discovery + mode control + boundary instrumentation.
+    # These prove the new EPR path is linked into the production image and
+    # not compiled out: OnSprSrcCaps reads the 5 V PDO EPR bit, ModeEnter/
+    # ModeExit reach the ST PE, Probe/Diag/PollTx are the layer evidence.
+    'APP_EPR_OnSprSrcCaps', 'APP_EPR_ModeEnter', 'APP_EPR_ModeExit',
+    'APP_EPR_RequestSrcCapa', 'APP_EPR_Probe', 'APP_EPR_Diag',
+    'APP_EPR_PollTx', 'APP_EPR_StatusName', 'APP_EPR_PowerStateName',
     'APP_CMD_Poll',
     # chunked extended-message reassembly
     'APP_EXT_Feed', 'APP_EXT_Reset', 'APP_EXT_ChunkSize',
