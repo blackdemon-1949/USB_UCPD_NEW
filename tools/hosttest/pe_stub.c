@@ -39,5 +39,11 @@ USBPD_StatusTypeDef USBPD_PE_Request_EPRModeExit(uint8_t PortNum)
 
 const APP_CBL_Info_t *APP_CBL_GetLive(void)
 {
-  return NULL;
+  static const APP_CBL_Info_t none;
+  return &none;      /* the real one is never NULL either */
+}
+
+uint8_t APP_CBL_IsLive(void)
+{
+  return 0u;         /* no Discover Identity on the host */
 }

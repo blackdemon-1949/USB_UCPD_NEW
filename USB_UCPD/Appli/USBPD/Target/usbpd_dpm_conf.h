@@ -138,7 +138,14 @@ USBPD_USER_SettingsTypeDef       DPM_USER_Settings[USBPD_PORT_COUNT] =
 {
   {
     .PE_DataSwap = USBPD_TRUE,                  /* support data swap                                       */
-    .PE_VconnSwap = USBPD_TRUE,                 /* support VCONN swap                                  */
+    /* HARDWARE TRUTH: this board has NO VCONN supply.
+     * BSP_USBPD_PWR_VCONNOn() returns BSP_ERROR_FEATURE_NOT_SUPPORTED, so
+     * advertising VCONN swap invites the source to hand us VCONN duty during
+     * EPR entry (PD3.1 requires the SOURCE to be VCONN source before it will
+     * discover the cable).  Accepting a swap we cannot honour leaves the
+     * cable unpowered and the entry AMS stalls with no reply - which matches
+     * the bench behaviour.  Declare the real capability. */
+    .PE_VconnSwap = USBPD_FALSE,                /* no VCONN supply on this board       */
     .PE_DR_Swap_To_DFP = USBPD_TRUE,                  /*  Support of DR Swap to DFP                                  */
     .PE_DR_Swap_To_UFP = USBPD_TRUE,                  /*  Support of DR Swap to UFP                                  */
      .DPM_SNKExtendedCapa =                        /*!< SNK Extended Capability        */

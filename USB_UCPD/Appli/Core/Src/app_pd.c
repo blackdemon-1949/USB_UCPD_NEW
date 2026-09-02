@@ -27,6 +27,9 @@ static uint8_t  s_auto_applied;      /* 1 = auto request already sent for this a
 static uint8_t  s_auto_pending;      /* 1 = SNK_READY seen, auto request to apply in task */
 static uint8_t  s_snk_ready_seen;    /* 1 = "[PD] SNK ready" already printed this attach */
 static uint8_t  s_caps_printed;      /* 1 = caps table already printed for current PDO set */
+/* Attempts allowed for automatic EPR mode entry per attach. */
+#define APP_PD_EPR_ENTER_TRIES 4U
+static uint8_t  s_epr_enter_tries;
 static uint8_t  s_epr_enter_done;    /* 1 = EPR entry already attempted this attach */
 static uint32_t s_epr_enter_at;      /* tick at which to attempt EPR entry */
 static uint32_t s_sweep_to, s_sweep_step, s_sweep_ma;
@@ -51,6 +54,7 @@ void APP_PD_Init(void)
   s_auto_pending = 0U;
   s_snk_ready_seen = 0U;
   s_epr_enter_done = 0U;   /* re-arm EPR entry for the new contract */
+  s_epr_enter_tries = 0U;
   s_epr_enter_at = 0U;
   s_caps_printed = 0U;
   s_sweep_active = 0U;
@@ -98,6 +102,7 @@ void APP_PD_OnCable(uint8_t port, USBPD_CAD_EVENT ev)
       s_auto_applied = 0U;
       s_snk_ready_seen = 0U;
       s_epr_enter_done = 0U;   /* re-arm EPR entry for the new contract */
+      s_epr_enter_tries = 0U;
       s_epr_enter_at = 0U;
       s_caps_printed = 0U;
       APP_LED_Set(APP_LED_PD_WAIT);
@@ -115,6 +120,7 @@ void APP_PD_OnCable(uint8_t port, USBPD_CAD_EVENT ev)
       s_auto_applied = 0U;
       s_snk_ready_seen = 0U;
       s_epr_enter_done = 0U;   /* re-arm EPR entry for the new contract */
+      s_epr_enter_tries = 0U;
       s_epr_enter_at = 0U;
       s_caps_printed = 0U;
       s_sweep_active = 0U;
@@ -160,6 +166,7 @@ void APP_PD_OnNotify(uint8_t port, USBPD_NotifyEventValue_TypeDef ev)
       s_vbus_restore_at = HAL_GetTick() + 50U;
       s_snk_ready_seen = 0U;   /* report once when the sink is ready again */
       s_epr_enter_done = 0U;   /* re-arm EPR entry for the new contract */
+      s_epr_enter_tries = 0U;
       s_epr_enter_at = 0U;
       APP_LED_Set(APP_PD_Port[port].Attached ? APP_LED_PD_WAIT : APP_LED_HEARTBEAT);
       APP_LOG_Write("[PD] hard reset\r\n");
@@ -216,6 +223,11 @@ void APP_PD_Task(void)
   /* Resolve any queued EPR request into a real wire outcome (sent / not
    * sent).  This is what turns "the PE accepted it" into evidence. */
   APP_EPR_PollTx(0U);
+  APP_EPR_PollEnter();
+
+  /* Refresh the e-marker derived 5 A flag here, in task context.  It must not
+   * be done from USBPD_DPM_GetDataInfo, which runs inside the PE. */
+  APP_EPR_RefreshCable();
 
   /* Automatic EPR mode entry.
    *
@@ -243,9 +255,31 @@ void APP_PD_Task(void)
     }
     else if ((int32_t)(now - s_epr_enter_at) >= 0)
     {
-      s_epr_enter_done = 1U;
-      s_epr_enter_at = 0U;
-      (void)APP_EPR_ModeEnter(0U);
+      /* Retry a few times.  A single attempt is not enough in practice: the
+       * PE can be mid-AMS (returns USBPD_ERROR/BUSY), and a source may simply
+       * not answer the first EPR_Mode(Enter).  PD3.1 allows the sink to
+       * re-attempt entry; give up after APP_PD_EPR_ENTER_TRIES so a source
+       * that genuinely refuses is not hammered forever. */
+      USBPD_StatusTypeDef est = APP_EPR_ModeEnter(0U);
+
+      s_epr_enter_tries++;
+      if ((est == USBPD_OK) || (s_epr_enter_tries >= APP_PD_EPR_ENTER_TRIES))
+      {
+        s_epr_enter_done = 1U;
+        s_epr_enter_at = 0U;
+        if (est != USBPD_OK)
+        {
+          APP_LOG_Printf("EPR: giving up mode entry after %u attempts "
+                         "(last status %s)\r\n",
+                         (unsigned)s_epr_enter_tries,
+                         APP_EPR_StatusName((int)est));
+        }
+      }
+      else
+      {
+        /* Retry after the PE has had time to finish whatever AMS is running. */
+        s_epr_enter_at = now + 500U;
+      }
     }
   }
 #endif

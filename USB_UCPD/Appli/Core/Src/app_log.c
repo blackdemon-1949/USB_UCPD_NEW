@@ -5,13 +5,18 @@
 #include <string.h>
 #include <stdarg.h>
 
-#define LOG_Q_SIZE  2048U
+/* 8 kB: the help text alone is ~2.5 kB and PD/EPR events can burst while the
+ * host is not draining.  At 2 kB the queue overflowed and dropped the tail
+ * silently, which on the bench looked exactly like a firmware reboot. */
+#define LOG_Q_SIZE  8192U
 
 static uint8_t  s_q[LOG_Q_SIZE];
 static uint16_t s_head;
 static uint16_t s_tail;
 static uint8_t  s_usb_ready;
 static volatile uint8_t s_tx_busy;
+static uint32_t s_dropped;      /* bytes discarded because the queue was full */
+static uint8_t  s_drop_flagged; /* 1 = a drop notice is still owed to the host */
 /* CDC IN DMA reads this buffer; it must not be held in a stale D-cache line. */
 static uint8_t  s_tx[256]
   __attribute__((section("noncacheable_buffer"), aligned(32)));
@@ -74,11 +79,21 @@ void APP_LOG_WriteRaw(const uint8_t *data, uint16_t len)
     uint16_t next = (uint16_t)((s_head + 1U) % LOG_Q_SIZE);
     if (next == s_tail)
     {
+      /* Queue full.  Account for the loss instead of dropping it silently -
+       * silent truncation is what made a chopped console line look like a
+       * spontaneous reboot. */
+      s_dropped += (uint32_t)(len - i);
+      s_drop_flagged = 1U;
       break;
     }
     s_q[s_head] = data[i];
     s_head = next;
   }
+}
+
+uint32_t APP_LOG_Dropped(void)
+{
+  return s_dropped;
 }
 
 void APP_LOG_Write(const char *s)

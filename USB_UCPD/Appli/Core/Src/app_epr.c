@@ -17,6 +17,13 @@
 #include "usbpd_dpm_core.h"
 #include "app_diag.h"
 #include "usbpd_trace.h"
+#include "main.h"          /* HAL_GetTick */
+#endif
+
+#if !defined(APP_EPR_TARGET_PROBE)
+/* Host build: no HAL tick source.  The reply watchdog is target behaviour and
+ * is not exercised by the host tests, so a monotonic stub is sufficient. */
+static uint32_t HAL_GetTick(void) { static uint32_t t; return ++t; }
 #endif
 
 #include <string.h>
@@ -201,13 +208,13 @@ uint32_t APP_EPR_GetSinkAvsPdo(void)
 void APP_EPR_RefreshCable(void)
 {
 #if APP_ENG_CABLE_VDM
-  const APP_CBL_Info_t *cbl = APP_CBL_GetLive();
-
-  /* Only assert from a decoded identity.  A cable that has not answered
-   * Discover Identity yet must not clear a verdict already established, and
-   * must never silently upgrade the sink to 5 A. */
-  if ((cbl != NULL) && (cbl->valid != 0u))
+  /* APP_CBL_GetLive() returns the address of a static and is NEVER NULL, so a
+   * null check proves nothing.  Validity is carried by APP_CBL_IsLive(); use
+   * that, otherwise an all-zero struct would be read as a real identity. */
+  if (APP_CBL_IsLive() != 0u)
   {
+    const APP_CBL_Info_t *cbl = APP_CBL_GetLive();
+
     APP_EPR_Ctx.cable_5a = (cbl->current_cap == APP_CBL_CUR_5A) ? 1u : 0u;
   }
 #endif
@@ -230,10 +237,13 @@ uint32_t APP_EPR_GetSinkPdpW(void)
     ma = 5000u;
   }
   /* An e-marked 5 A cable is required for EPR; without a confirmed 5 A
-   * marking assume the 3 A default the Type-C spec guarantees.  The flag is
-   * refreshed from the live Discover Identity result, so this tracks the
-   * cable actually plugged in rather than a build-time assumption. */
-  APP_EPR_RefreshCable();
+   * marking assume the 3 A default the Type-C spec guarantees.
+   *
+   * cable_5a is refreshed from the main loop (APP_EPR_RefreshCable), NOT from
+   * here.  This function is reached from USBPD_DPM_GetDataInfo, i.e. from
+   * inside the ST policy engine's own callback while it is building
+   * EPR_Mode(Enter); doing cable/VDM work there re-enters the stack from its
+   * own call stack.  Keep this path a pure read of already-decoded state. */
   if (APP_EPR_Ctx.cable_5a == 0u)
   {
     if (ma > 3000u) { ma = 3000u; }
@@ -437,13 +447,55 @@ USBPD_StatusTypeDef APP_EPR_RequestSrcCapa(uint8_t port)
 USBPD_StatusTypeDef APP_EPR_ModeEnter(uint8_t port)
 {
   USBPD_StatusTypeDef st = USBPD_PE_Request_EPRModeEnter(port);
+
   APP_EPR_Ctx.enter_st = (uint8_t)st;
   APP_EPR_Ctx.enter_valid = 1u;
   APP_EPR_Ctx.enter_req_st = (uint8_t)st;
+
+  if (st == USBPD_OK)
+  {
+    /* Arm the reply watchdog.  "Queued" is not "entered": the partner still
+     * has to answer with Enter Acknowledged / Succeeded / Failed.  Without
+     * this the console would sit for ever showing a request that the source
+     * silently ignored. */
+    APP_EPR_Ctx.enter_pending  = 1u;
+    APP_EPR_Ctx.enter_deadline = HAL_GetTick() + APP_EPR_ENTER_REPLY_MS;
+  }
+
   APP_LOG_Printf("EPR_Mode(Enter): API status = %s (%d)%s\r\n",
                  APP_EPR_StatusName(st), (int)st,
-                 (st == USBPD_OK) ? " -> queued to PE" : " -> NOT queued");
+                 (st == USBPD_OK) ? " -> ACCEPTED by PE (queued, awaiting source reply)"
+                                  : " -> REJECTED, nothing queued");
   return st;
+}
+
+/**
+  * @brief  Fail an EPR_Mode(Enter) that the partner never answered.
+  *
+  * PD3.1 gives the source tEnterEPR to respond.  Reporting the silence is the
+  * difference between "we do not know" and a diagnosis.
+  */
+void APP_EPR_PollEnter(void)
+{
+  if (APP_EPR_Ctx.enter_pending == 0u)
+  {
+    return;
+  }
+  if (APP_EPR_Ctx.mode != 0u)
+  {
+    APP_EPR_Ctx.enter_pending = 0u;      /* Enter Succeeded already seen */
+    return;
+  }
+  if ((int32_t)(HAL_GetTick() - APP_EPR_Ctx.enter_deadline) < 0)
+  {
+    return;
+  }
+
+  APP_EPR_Ctx.enter_pending = 0u;
+  APP_EPR_Ctx.n_failed++;
+  APP_LOG_Printf("EPR_Mode(Enter): NO REPLY from source within %u ms - "
+                 "entry did not happen (source ignored the request)\r\n",
+                 (unsigned)APP_EPR_ENTER_REPLY_MS);
 }
 
 USBPD_StatusTypeDef APP_EPR_ModeExit(uint8_t port)

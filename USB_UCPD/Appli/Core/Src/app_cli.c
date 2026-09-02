@@ -19,6 +19,11 @@ static uint8_t  s_rx[CLI_RX_MAX];
 static volatile uint16_t s_rx_head;
 static volatile uint16_t s_rx_tail;
 static uint8_t  s_greeted;
+static uint32_t s_last_greet_tick;
+
+/* Ignore a DTR re-assert within this window of the last greeting: it is the
+ * same host re-opening, not a new session. */
+#define APP_CLI_REGREET_HOLDOFF_MS  3000u
 
 void APP_CLI_Init(void)
 {
@@ -108,7 +113,10 @@ void APP_CLI_PrintBanner(void)
     "USB CDC up. Type help\r\n"
     "\r\n"
   );
-  APP_CLI_PrintHelp();
+  /* Do NOT dump the full help here.  Banner + help is ~2.5 kB against a 2 kB
+   * log queue, so the tail was silently discarded and the console showed a
+   * message chopped mid-word.  'help' prints it on demand, in chunks the
+   * queue can drain. */
   if (APP_PD_IsAttached())
   {
     APP_PD_PrintCaps();
@@ -123,6 +131,29 @@ void APP_CLI_PrintBanner(void)
 
 void APP_CLI_OnHostOpen(void)
 {
+  /* HARDWARE-DRIVEN FIX.
+   *
+   * Windows re-asserts DTR on this CDC port repeatedly - on driver (re)bind,
+   * on every open by a terminal, on the Code 10 recovery cycle, and after
+   * selective suspend.  Each assertion used to re-print the banner AND the
+   * whole help text (~2.5 kB) into a 2 kB queue, so the queue overflowed and
+   * truncated mid-word, and the console looked like the board had rebooted
+   * mid-session.  It never had: no reset path exists in this firmware and
+   * every fault handler is a while(1).
+   *
+   * The bench log showing the banner appearing right after
+   * "EPR_Mode(Enter): API status = USBPD_OK" was this, not a crash.
+   *
+   * Re-greet only when the host has actually been away, so a spurious DTR
+   * re-assert while a session is already running is ignored. */
+  if (s_greeted == 0u)
+  {
+    return;                 /* greeting already pending */
+  }
+  if ((HAL_GetTick() - s_last_greet_tick) < APP_CLI_REGREET_HOLDOFF_MS)
+  {
+    return;                 /* same host, spurious DTR toggle - stay quiet */
+  }
   s_greeted = 0;
 }
 
@@ -480,6 +511,7 @@ void APP_CLI_Poll(void)
   if ((s_greeted == 0U) && APP_LOG_UsbReady())
   {
     s_greeted = 1U;
+    s_last_greet_tick = HAL_GetTick();
     APP_CLI_PrintBanner();
   }
 

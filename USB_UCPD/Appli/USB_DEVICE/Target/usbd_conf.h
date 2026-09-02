@@ -75,9 +75,27 @@
 /*---------- -----------*/
 #define USBD_DEBUG_LEVEL     0U
 /*---------- -----------*/
-#define USBD_LPM_ENABLED     1U
+/* WINDOWS CODE 10 ROOT CAUSE.
+ * The BOS descriptor advertised LPM (USBD_LPM_ENABLED = 1) while the PCD
+ * was initialised with Init.lpm_enable = DISABLE (usbd_conf.c).  The device
+ * therefore told the host it supported Link Power Management but the
+ * controller never answered an LPM transaction.  Windows honours the BOS
+ * capability strictly and fails the device with 'This device cannot start
+ * (Code 10)'; the ad-hoc recovery is exactly the replug / disable-enable
+ * cycle seen on the bench.  macOS ignores the LPM capability, which is why
+ * the fault looked OS-specific.
+ *
+ * The two must agree.  LPM buys nothing for a bench CDC console, so it is
+ * turned off here to match the hardware configuration. */
+#define USBD_LPM_ENABLED     0U
 /*---------- -----------*/
 #define USBD_SELF_POWERED     1U
+
+/* MaxPower was never defined, so the library default of 100 mA applied even
+ * though the descriptor claims self-powered.  State it explicitly (2 mA) so
+ * the configuration descriptor is self-consistent and Windows' power budget
+ * checks cannot reject the interface on a loaded hub. */
+#define USBD_MAX_POWER        0x01U  /* 2 mA - board is self powered */
 
 /****************************************/
 /* #define for FS and HS identification */

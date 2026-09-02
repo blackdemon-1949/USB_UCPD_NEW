@@ -92,6 +92,9 @@ extern "C" {
 /** Max main-loop polls to wait for a queued EPR request to reach the wire. */
 #define APP_EPR_TX_POLL_LIMIT   200u
 
+/* PD3.1 tEnterEPR is 500 ms; allow margin for a chunked reply. */
+#define APP_EPR_ENTER_REPLY_MS  1200u
+
 /**
   * @brief Snapshot of every precondition the ST core library actually tests,
   *        plus the layer counters, taken at one instant.
@@ -142,6 +145,8 @@ typedef struct
   uint8_t  getsrc_valid;    /* 0 = EPR_Get_Source_Cap never attempted  */
   uint32_t last_mode_do;    /* raw EPRMDO last received from the partner   */
   uint8_t  cable_5a;        /* 1 = e-marker confirmed a 5 A cable          */
+  uint8_t  enter_pending;   /* EPR_Mode(Enter) queued, reply not seen yet  */
+  uint32_t enter_deadline;  /* tick by which the reply must arrive         */
   uint8_t  getsrc_pending;  /* request accepted by PE, wire outcome unknown */
   uint8_t  getsrc_txd;      /* 1 = a UCPD TX was actually observed after it */
   uint32_t getsrc_tx_at;    /* PD TX counter when the request was accepted  */
@@ -214,6 +219,8 @@ void APP_EPR_Probe(uint8_t port, APP_EPR_Probe_t *pr);
 void APP_EPR_Diag(uint8_t port);
 /** Main-loop poll: resolve a queued request into sent / not-sent. */
 void APP_EPR_PollTx(uint8_t port);
+/** Main-loop poll: report an EPR_Mode(Enter) the partner never answered. */
+void APP_EPR_PollEnter(void);
 /** Install a minimal PD frame counter funnel when the capture engine is
  *  compiled out, so PD TX/RX/GoodCRC counters are real in every profile. */
 void APP_EPR_InstallTraceFunnel(void);

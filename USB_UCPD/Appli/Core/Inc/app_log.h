@@ -10,6 +10,8 @@ extern "C" {
 
 void APP_LOG_Init(void);
 void APP_LOG_Flush(void);
+/** Bytes discarded because the console queue was full (0 = none). */
+uint32_t APP_LOG_Dropped(void);
 int  APP_LOG_Printf(const char *fmt, ...);
 void APP_LOG_Write(const char *s);
 void APP_LOG_WriteRaw(const uint8_t *data, uint16_t len);
