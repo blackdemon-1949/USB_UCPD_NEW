@@ -99,7 +99,7 @@ void APP_CLI_PrintHelp(void)
     "  help                   this list\r\n"
     "\r\n"
     "wire a PD source to PM0 (CC1) or PM1 (CC2) plus GND. The USB Type-C port is this\r\n"
-    "console; the USB-PD trace for STM32CubeMonitor-UCPD is on USART1 PA9/PA10 @921600.\r\n"
+    "console; the USB-PD trace for STM32CubeMonitor-UCPD is on USART1 PB6/PB7 @921600.\r\n"
   );
   /* Commands contributed by the analyzer feature layers (see app_cmd.c). */
   APP_CMD_PrintHelp();
