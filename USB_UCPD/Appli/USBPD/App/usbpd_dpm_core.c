@@ -101,6 +101,51 @@ static void USBPD_DPM_CADTaskWakeUp(void);
   * @brief  Initialize the core stack (port power role, PWR_IF, CAD and PE Init procedures)
   * @retval USBPD status
   */
+/* Safe stubs for callback slots this sink does not implement.
+ *
+ * A disassembly sweep of every object in the v5.4.1 core library found the
+ * PE calls several callback slots with 'ldr rN,[cb,#off]; blx rN' and NO
+ * null check.  Among them, reachable from USBPD_PE_StateMachine_SNK:
+ *     +0x24 PowerRoleSwap        (usbpd_pe_snk.o +0x8aa/+0x910/+0x970)
+ *     +0x2C EvaluateVconnSwap    (usbpd_pe_vconn.o +0x292)
+ * A NULL in any of those branches to address 0 and hard-faults.
+ *
+ * Supplying inert handlers costs nothing and removes a whole class of
+ * lock-ups.  Each one answers truthfully for a VCONN-less, sink-only
+ * board rather than pretending the operation succeeded. */
+static USBPD_StatusTypeDef DPM_NoSetupNewPower(uint8_t PortNum)
+{
+  (void)PortNum;
+  return USBPD_OK;      /* sink: nothing to reconfigure */
+}
+
+static USBPD_StatusTypeDef DPM_NoPRSwap(uint8_t PortNum)
+{
+  (void)PortNum;
+  return USBPD_REJECT;  /* sink-only board: never becomes a source */
+}
+
+static USBPD_StatusTypeDef DPM_NoSrcEvaluateRequest(uint8_t PortNum,
+                                                    USBPD_CORE_PDO_Type_TypeDef *PtrPowerObject)
+{
+  (void)PortNum;
+  if (PtrPowerObject != NULL)
+  {
+    *PtrPowerObject = USBPD_CORE_PDO_TYPE_FIXED;
+  }
+  return USBPD_REJECT;  /* we are not a source */
+}
+
+static void DPM_NoPowerRoleSwap(uint8_t PortNum,
+                                USBPD_PortPowerRole_TypeDef CurrentRole,
+                                USBPD_PRS_Status_TypeDef Status)
+{
+  (void)PortNum;
+  (void)CurrentRole;
+  (void)Status;         /* no power-role swap on this board */
+}
+
+
 USBPD_StatusTypeDef USBPD_DPM_InitCore(void)
 {
   /* variable to get dynamique memory allocated by usbpd stack */
@@ -110,24 +155,37 @@ USBPD_StatusTypeDef USBPD_DPM_InitCore(void)
   /* CAD callback definition */
   static const USBPD_PE_Callbacks dpmCallbacks =
   {
-    NULL,
+    DPM_NoSetupNewPower,
     USBPD_DPM_HardReset,
-    NULL,
+    DPM_NoPRSwap,
     USBPD_DPM_Notification,
     USBPD_DPM_ExtendedMessageReceived,
     USBPD_DPM_GetDataInfo,
     USBPD_DPM_SetDataInfo,
-    NULL,
+    DPM_NoSrcEvaluateRequest,
     USBPD_DPM_SNK_EvaluateCapabilities,
-    NULL,
+    DPM_NoPowerRoleSwap,
     USBPD_PE_TaskWakeUp,
-#if defined(_VCONN_SUPPORT)
+    /* THE EPR BRICK.  These two slots must NEVER be NULL.
+     *
+     * PE_SubStateMachine_VconnSwap (usbpd_pe_vconn.o +0x292) does:
+     *     ldr  r2, [r1, #0x2c]   ; cb->USBPD_PE_EvaluateVconnSwap
+     *     blx  r2                ; NO null check
+     * It calls the pointer unconditionally.  This project is built
+     * WITHOUT _VCONN_SUPPORT, so the generated code shipped NULL here
+     * and the branch jumped to address 0 -> HardFault.
+     *
+     * It only ever bit with an EPR source: PD3.1 requires the SOURCE to
+     * be VCONN Source before it discovers the cable for EPR entry, so an
+     * EPR charger starts a VCONN_Swap immediately after EPR_Mode(Enter),
+     * while an SPR charger never does.  That is exactly the observed
+     * behaviour: SPR fine, EPR locks the board until a power cycle.
+     *
+     * The handlers are always supplied now.  They are safe without a
+     * VCONN supply: EvaluateVconnSwap answers from real capability and
+     * VconnPwr reports failure rather than pretending. */
     USBPD_DPM_EvaluateVconnSwap,
     USBPD_DPM_PE_VconnPwr,
-#else
-    NULL,
-    NULL,
-#endif /* _VCONN_SUPPORT */
     USBPD_DPM_EnterErrorRecovery,
     USBPD_DPM_EvaluateDataRoleSwap,
     USBPD_DPM_IsPowerReady

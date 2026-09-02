@@ -230,9 +230,13 @@ int main(void)
   APP_LED_Set(APP_LED_HEARTBEAT);
 
   /* Backup SRAM: keeps the fault record across a warm reset so a crash can
-   * be diagnosed on the next boot instead of only blinking an LED. */
+   * be diagnosed on the next boot instead of only blinking an LED.
+   * The clock alone is not enough - without the backup regulator the
+   * contents are not retained, which is why the first attempt at this
+   * printed nothing after the EPR lock-up. */
   HAL_PWR_EnableBkUpAccess();
   __HAL_RCC_BKPRAM_CLK_ENABLE();
+  (void)HAL_PWREx_EnableBkUpReg();
 
   /* I2C2 / SPI extension footprints (see ext_i2c.c / ext_spi.c) */
   EXT_I2C_Init();

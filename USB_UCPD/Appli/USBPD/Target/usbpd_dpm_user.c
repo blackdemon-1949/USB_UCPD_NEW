@@ -424,9 +424,23 @@ void USBPD_DPM_SNK_EvaluateCapabilities(uint8_t PortNum, uint32_t *PtrRequestDat
 USBPD_StatusTypeDef USBPD_DPM_EvaluateVconnSwap(uint8_t PortNum)
 {
 /* USER CODE BEGIN USBPD_DPM_EvaluateVconnSwap */
+  /* Called (unguarded) by PE_SubStateMachine_VconnSwap when the partner
+   * asks us to become VCONN Source.  An EPR source does this right after
+   * EPR_Mode(Enter) so it can discover the cable.
+   *
+   * This board has NO VCONN supply - BSP_USBPD_PWR_VCONNOn() returns
+   * BSP_ERROR_FEATURE_NOT_SUPPORTED - so accepting would promise power we
+   * cannot deliver and strand the cable's e-marker unpowered.  Answer with
+   * the truth and let the source keep the VCONN role, which is the normal
+   * and spec-legal outcome for a sink that is not VCONN capable. */
   USBPD_StatusTypeDef status = USBPD_REJECT;
-  if (USBPD_TRUE == DPM_USER_Settings[PortNum].PE_VconnSwap)
+
+  if ((PortNum < USBPD_PORT_COUNT) &&
+      (USBPD_TRUE == DPM_USER_Settings[PortNum].PE_VconnSwap) &&
+      (USBPD_TRUE == DPM_Params[PortNum].VconnStatus))
   {
+    /* Already sourcing VCONN: a swap request is then a request to STOP,
+     * which we can always honour. */
     status = USBPD_ACCEPT;
   }
 
