@@ -87,6 +87,37 @@ USBPD_SettingsTypeDef       DPM_Settings[USBPD_PORT_COUNT] =
       .Is_SecurityRequest_Supported     = USBPD_TRUE,  /*!< Security_Response message supported or not by DPM */
       .Is_FirmUpdateRequest_Supported   = USBPD_TRUE,  /*!< Firmware update response message supported by PE */
       .Is_GetBattery_Supported          = USBPD_TRUE,  /*!< Get Battery Capabitity and Status messages supported by PE */
+      /* EPR (USB PD 3.1 Extended Power Range).
+       *
+       * THIS FLAG IS THE ROOT CAUSE OF THE MISSING EPR WIRE TRAFFIC.
+       * Verified by disassembling the prebuilt ST PD3_FULL core library
+       * (Core/lib/USBPDCORE_PD3_FULL_CM7_wc32.a, usbpd_pe.o) rather than by
+       * reading headers.  USBPD_PE_Send_ExtendeControlMessage() at +0x682,
+       * on the EPR_GETSRCCAPA branch, does:
+       *
+       *   ldr   r1, [r3]        ; r3 = per-port ctx -> DPM_Settings
+       *   ldrh  r2, [r1, #8]    ; offset 8 = PE_PD3_Support (confirmed by
+       *                         ;   offsetof(USBPD_SettingsTypeDef,...) = 8)
+       *   ubfx  r1, r2, #0xb, #1; bit 11 = Is_EPR_Supported_SNK
+       *   cbz   r1, skip        ; -> falls through WITHOUT queueing anything
+       *
+       * With the bit clear the library silently skipped the message queue and
+       * still returned, so EPR_Get_Source_Cap never reached PRL/UCPD and
+       * nothing appeared on CC.  That is exactly the observed hardware
+       * behaviour: normal SPR traffic and no EPR at all.
+       * (Bit 12, Is_EPR_Supported_SRC, gates the EPR_GETSNKCAPA branch the
+       * same way; this board is a sink so it stays FALSE.)
+       *
+       * The flag is also what makes the stack set the EPR_Capable bit in the
+       * RDO, which per PD3.1 6.4.10.1 the source Shall have seen in the most
+       * recent Request before it will accept EPR_Mode(Enter).
+       *
+       * Note: USBPD_PE_Request_EPRModeEnter() itself does NOT test this bit.
+       * Its own gates (usbpd_pe.o +0x48e) are PE_IsConnected, an SPR explicit
+       * contract in the sink role (Params & 0x704 == 0x300) and spec rev 3 -
+       * which is why entry is driven from the task loop after SNK_READY. */
+      .Is_EPR_Supported_SNK             = USBPD_TRUE,  /*!< PD3.1 EPR sink support */
+      .Is_EPR_Supported_SRC             = USBPD_FALSE, /*!< this board is sink-only */
     },
 
     .CAD_SRCToggleTime = 0,                    /* uint8_t CAD_SRCToggleTime; */

@@ -27,6 +27,8 @@ static uint8_t  s_auto_applied;      /* 1 = auto request already sent for this a
 static uint8_t  s_auto_pending;      /* 1 = SNK_READY seen, auto request to apply in task */
 static uint8_t  s_snk_ready_seen;    /* 1 = "[PD] SNK ready" already printed this attach */
 static uint8_t  s_caps_printed;      /* 1 = caps table already printed for current PDO set */
+static uint8_t  s_epr_enter_done;    /* 1 = EPR entry already attempted this attach */
+static uint32_t s_epr_enter_at;      /* tick at which to attempt EPR entry */
 static uint32_t s_sweep_to, s_sweep_step, s_sweep_ma;
 static uint32_t s_sweep_next_mv;
 static uint32_t s_sweep_next_time;
@@ -48,6 +50,8 @@ void APP_PD_Init(void)
   s_auto_applied = 0U;
   s_auto_pending = 0U;
   s_snk_ready_seen = 0U;
+  s_epr_enter_done = 0U;   /* re-arm EPR entry for the new contract */
+  s_epr_enter_at = 0U;
   s_caps_printed = 0U;
   s_sweep_active = 0U;
 }
@@ -93,6 +97,8 @@ void APP_PD_OnCable(uint8_t port, USBPD_CAD_EVENT ev)
       s_vbus_restore_at = 0U;
       s_auto_applied = 0U;
       s_snk_ready_seen = 0U;
+      s_epr_enter_done = 0U;   /* re-arm EPR entry for the new contract */
+      s_epr_enter_at = 0U;
       s_caps_printed = 0U;
       APP_LED_Set(APP_LED_PD_WAIT);
       APP_LOG_Printf("\r\n[PD] CC attached (event %u, CC%u)\r\n",
@@ -108,6 +114,8 @@ void APP_PD_OnCable(uint8_t port, USBPD_CAD_EVENT ev)
       s_vbus_restore_at = 0U;
       s_auto_applied = 0U;
       s_snk_ready_seen = 0U;
+      s_epr_enter_done = 0U;   /* re-arm EPR entry for the new contract */
+      s_epr_enter_at = 0U;
       s_caps_printed = 0U;
       s_sweep_active = 0U;
       APP_LED_Set(APP_LED_HEARTBEAT);
@@ -151,6 +159,8 @@ void APP_PD_OnNotify(uint8_t port, USBPD_NotifyEventValue_TypeDef ev)
       APP_PD_Port[port].SyntheticVbusMv = 0U;
       s_vbus_restore_at = HAL_GetTick() + 50U;
       s_snk_ready_seen = 0U;   /* report once when the sink is ready again */
+      s_epr_enter_done = 0U;   /* re-arm EPR entry for the new contract */
+      s_epr_enter_at = 0U;
       APP_LED_Set(APP_PD_Port[port].Attached ? APP_LED_PD_WAIT : APP_LED_HEARTBEAT);
       APP_LOG_Write("[PD] hard reset\r\n");
       break;
@@ -201,6 +211,40 @@ void APP_PD_Task(void)
     s_auto_pending = 0U;
     APP_PD_AutoApply(0U);
   }
+
+#if APP_ENG_EPR && defined(USBPDCORE_EPR)
+  /* Automatic EPR mode entry.
+   *
+   * PD3.1 6.4.10.1 requires that, at the moment EPR_Mode(Enter) is sent:
+   *   - an SPR *explicit contract* is in place (PE in SNK_READY), and
+   *   - the EPR Mode Capable bit was set in the most recent RDO.
+   *
+   * Both are only true after the first Request/Accept/PS_RDY completed, which
+   * is why entry is driven from the task loop after SNK_READY and not from
+   * inside the notification callback (re-entering the PE from its own
+   * callback is what made previous attempts return BUSY).  One attempt per
+   * attach; 'epr enter' retries manually. */
+  if ((APP_PD_Port[0].Attached != 0U) &&
+      (s_epr_enter_done == 0U) &&
+      (APP_EPR_Ctx.enable != 0u) &&
+      (APP_EPR_Ctx.src_spr_epr_capable != 0u) &&
+      (APP_EPR_Ctx.mode == 0u) &&
+      (s_snk_ready_seen != 0U) &&
+      (DPM_Params[0].PE_Power == USBPD_POWER_EXPLICITCONTRACT))
+  {
+    if (s_epr_enter_at == 0U)
+    {
+      /* Let the explicit contract settle before starting a new AMS. */
+      s_epr_enter_at = now + 300U;
+    }
+    else if ((int32_t)(now - s_epr_enter_at) >= 0)
+    {
+      s_epr_enter_done = 1U;
+      s_epr_enter_at = 0U;
+      (void)APP_EPR_ModeEnter(0U);
+    }
+  }
+#endif
 
   /* Voltage sweep (PPS): request the next step every 500 ms. */
   if (s_sweep_active != 0U)
@@ -306,6 +350,14 @@ void APP_PD_StoreSrcPDO(uint8_t port, const uint8_t *ptr, uint32_t size)
     APP_PD_PrintCaps();
     s_caps_printed = 1U;
   }
+
+  /* PD3.1 EPR discovery starts here: the EPR Mode Capable bit lives in the
+     5 V Fixed PDO of the ordinary SPR Source_Capabilities.  Inspecting it is
+     what lets the sink set RDO B21 on the next Request, which is the
+     precondition the source checks before accepting EPR_Mode(Enter). */
+#if APP_ENG_EPR
+  APP_EPR_OnSprSrcCaps(APP_PD_Port[port].ListOfRcvSRCPDO, n);
+#endif
 
   /* Note: automation (auto <mv> / remember) is applied from the SNK_READY
      notification, once the PE has finished its default 5 V negotiation. */

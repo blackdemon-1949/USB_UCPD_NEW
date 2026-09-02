@@ -14,6 +14,10 @@
 #include "app_cable.h"
 #include "app_dec.h"
 
+/* provided by log_stub.c */
+const char *log_stub_text(void);
+void log_stub_reset(void);
+
 static int s_pass;
 static int s_fail;
 
@@ -216,6 +220,117 @@ static void test_epr_avs(void)
   CHECK_EQ(APP_EPR_ClampRequest(pdo, 28000u, 0u, &mv, NULL), 0);
 }
 
+
+/* ---- EPR discovery: the 5 V Fixed PDO EPR Mode Capable bit (PD3.1 B23) ----
+ * This is the regression test for the bug that made EPR unreachable: the
+ * sink used to learn "source is EPR capable" only from EPR AVS PDOs, which
+ * arrive only AFTER EPR mode entry, which itself required the capability to
+ * be known.  Discovery must come from the ordinary SPR Source_Capabilities. */
+static void test_epr_discovery(void)
+{
+  uint32_t caps[2];
+
+  printf("test_epr_discovery\n");
+
+  APP_EPR_Init();
+
+  /* Plain 5 V/3 A Fixed PDO, EPR bit clear -> SPR-only source. */
+  caps[0] = (100u << 10) | (300u << 0);      /* Fixed, 5 V, 3 A */
+  caps[1] = 0u;
+  APP_EPR_OnSprSrcCaps(caps, 1u);
+  CHECK_EQ(APP_EPR_Ctx.src_spr_epr_capable, 0u);
+  CHECK_EQ(APP_EPR_ShouldRequest(), 0u);     /* RDO B21 must stay clear */
+
+  /* Same PDO with B23 set -> EPR-capable source. */
+  caps[0] |= APP_EPR_SRC_FIXED_EPR_CAPABLE;
+  APP_EPR_OnSprSrcCaps(caps, 1u);
+  CHECK_EQ(APP_EPR_Ctx.src_spr_epr_capable, 1u);
+  CHECK_EQ(APP_EPR_ShouldRequest(), 1u);     /* RDO B21 must now be set */
+
+  /* 'epr off' must still be able to force SPR operation. */
+  APP_EPR_Ctx.enable = 0u;
+  CHECK_EQ(APP_EPR_ShouldRequest(), 0u);
+  APP_EPR_Ctx.enable = 1u;
+
+  /* The bit is only defined in the FIRST PDO, and only for a Fixed Supply.
+   * An APDO in position 1 must never be read as an EPR advertisement. */
+  caps[0] = apdo_pps();
+  APP_EPR_OnSprSrcCaps(caps, 1u);
+  CHECK_EQ(APP_EPR_Ctx.src_spr_epr_capable, 0u);
+
+  /* Defensive: empty / NULL capability lists must not assert capability. */
+  APP_EPR_OnSprSrcCaps(NULL, 0u);
+  CHECK_EQ(APP_EPR_Ctx.src_spr_epr_capable, 0u);
+  APP_EPR_OnSprSrcCaps(caps, 0u);
+  CHECK_EQ(APP_EPR_Ctx.src_spr_epr_capable, 0u);
+}
+
+/* EPR power maths must not overflow or truncate at the 240 W / 5 A limits. */
+static void test_epr_power_math(void)
+{
+  uint32_t pdo;
+  uint32_t mv = 0u, ma = 0u;
+
+  printf("test_epr_power_math\n");
+
+  /* 240 W, 15-48 V.  At 48 V, 240 W would be 5.0 A exactly. */
+  pdo = APP_EPR_BuildAvsPdo(240u, 15000u, 48000u, 0u, 1u);
+  CHECK_EQ(APP_EPR_ClampRequest(pdo, 48000u, 48000u, &mv, &ma), 1);
+  CHECK_EQ(mv, 48000u);
+  CHECK_EQ(ma, 5000u);
+
+  /* At 15 V, 240 W would be 16 A -> must clamp to the 5 A connector limit. */
+  CHECK_EQ(APP_EPR_ClampRequest(pdo, 48000u, 15000u, &mv, &ma), 1);
+  CHECK_EQ(mv, 15000u);
+  CHECK_EQ(ma, 5000u);
+
+  /* 100 W at 28 V = 3.571 A -> 3550 mA after 50 mA rounding, no overflow. */
+  pdo = APP_EPR_BuildAvsPdo(100u, 15000u, 28000u, 0u, 1u);
+  CHECK_EQ(APP_EPR_ClampRequest(pdo, 28000u, 28000u, &mv, &ma), 1);
+  CHECK_EQ(mv, 28000u);
+  CHECK_EQ(ma, 3550u);
+  CHECK(ma * mv / 1000u <= 100u * 1000u);   /* never exceeds advertised PDP */
+
+  /* A zero-PDP advertisement must yield zero current, not a divide fault. */
+  pdo = APP_EPR_BuildAvsPdo(0u, 15000u, 28000u, 0u, 1u);
+  CHECK_EQ(APP_EPR_ClampRequest(pdo, 28000u, 28000u, &mv, &ma), 1);
+  CHECK_EQ(ma, 0u);
+}
+
+
+/* The CLI must never claim a protocol operation happened.  It reports the
+ * real API status string returned by the stack. */
+static void test_epr_cli_honesty(void)
+{
+  char *argv[4];
+  uint32_t caps[1];
+
+  printf("test_epr_cli_honesty\n");
+  APP_EPR_Init();
+
+  /* Status names must map to the real USBPD_StatusTypeDef enum values. */
+  CHECK(strstr(APP_EPR_StatusName(0), "USBPD_OK") != NULL);
+  CHECK(strstr(APP_EPR_StatusName(3), "USBPD_BUSY") != NULL);
+
+  /* Against an SPR-only source, 'epr status' must NOT claim EPR is available. */
+  caps[0] = (100u << 10) | (300u << 0);
+  APP_EPR_OnSprSrcCaps(caps, 1u);
+  log_stub_reset();
+  argv[0] = (char *)"epr"; argv[1] = (char *)"status";
+  CHECK_EQ(APP_EPR_Cmd(2, argv), 1);
+  CHECK(strstr(log_stub_text(), "EPR unavailable on this session") != NULL);
+  CHECK(strstr(log_stub_text(), "clear (SPR-only source)") != NULL);
+
+  /* With an EPR-capable source the verdict changes, but must still not claim
+   * an EPR contract exists before one has been negotiated. */
+  caps[0] |= APP_EPR_SRC_FIXED_EPR_CAPABLE;
+  APP_EPR_OnSprSrcCaps(caps, 1u);
+  log_stub_reset();
+  CHECK_EQ(APP_EPR_Cmd(2, argv), 1);
+  CHECK(strstr(log_stub_text(), "EPR available, not entered") != NULL);
+  CHECK(strstr(log_stub_text(), "EPR contract active") == NULL);
+}
+
 static void test_cable(void)
 {
   APP_CBL_Info_t info;
@@ -361,6 +476,9 @@ int main(void)
   test_pps_analyse();
   test_pps_rdo();
   test_epr_avs();
+  test_epr_discovery();
+  test_epr_power_math();
+  test_epr_cli_honesty();
   test_cable();
   test_cli_paths();
   printf("=== %d passed, %d failed ===\n", s_pass, s_fail);

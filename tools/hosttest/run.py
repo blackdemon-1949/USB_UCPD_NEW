@@ -39,10 +39,10 @@ SUITES = [
      [os.path.join(APPLI, 'Core', 'Src', f)
       for f in ('app_fuzz.c', 'app_dec.c', 'app_ext.c', 'app_txn.c',
                 'app_cap.c')]),
-    ('vectors', ['test_vectors_main.c', 'log_stub.c', 'target_stub.c'] + [os.path.join(APPLI, 'Core', 'Src', f)
+    ('vectors', ['test_vectors_main.c', 'log_stub.c', 'target_stub.c', 'pe_stub.c'] + [os.path.join(APPLI, 'Core', 'Src', f)
                  for f in ('app_test.c', 'app_pps.c', 'app_epr.c', 'app_cable.c',
                            'app_txn.c', 'app_dec.c', 'app_cap.c')]),
-    ('pps', ['test_pps.c', 'log_stub.c'] + [os.path.join(APPLI, 'Core', 'Src', f)
+    ('pps', ['test_pps.c', 'log_stub.c', 'pe_stub.c'] + [os.path.join(APPLI, 'Core', 'Src', f)
              for f in ('app_pps.c', 'app_epr.c', 'app_cable.c',
                        'app_txn.c', 'app_dec.c', 'app_cap.c')]),
 ]

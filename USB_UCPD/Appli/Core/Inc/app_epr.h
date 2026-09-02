@@ -31,6 +31,7 @@ extern "C" {
 
 #include <stdint.h>
 #include <stddef.h>
+#include "app_engines.h"
 
 /* AVS PDO field accessors */
 #define APP_EPR_AVS_PDP_W(p)      ((uint32_t)((p) & 0xFFu))
@@ -78,6 +79,9 @@ extern "C" {
 #define APP_EPR_MIN_MV              15000u   /* EPR starts above SPR 15 V   */
 #define APP_EPR_MAX_MV              48000u
 
+/* PD3.1: EPR Mode Capable bit in the first (5 V Fixed) Source PDO, B23. */
+#define APP_EPR_SRC_FIXED_EPR_CAPABLE  (1u << 23)
+
 typedef struct
 {
   uint8_t  enable;          /* user-controlled EPR enable              */
@@ -85,7 +89,9 @@ typedef struct
   uint32_t want_mv;         /* desired operating point (0 = highest)   */
   uint32_t want_ma;
 
-  uint8_t  src_epr_capable; /* source advertised EPR capability        */
+  uint8_t  src_epr_capable; /* source sent EPR AVS PDOs (EPR mode)     */
+  uint8_t  src_spr_epr_capable; /* SPR 5V Fixed PDO had EPR-capable bit */
+  uint8_t  enter_st;        /* last EPR_Mode(Enter) API status         */
   uint8_t  enter_req_st;    /* last USBPD_PE_Request_EPRModeEnter() status */
   uint8_t  getsrc_st;       /* last EPR_Get_Source_Cap request status      */
   uint8_t  n_src_avs;       /* number of EPR AVS PDOs received         */
@@ -134,11 +140,19 @@ uint32_t APP_EPR_GetSinkPdpW(void);
 void APP_EPR_OnSrcPdo(const uint8_t *ptr, uint32_t size);
 #if defined(USBPDCORE_EPR)
 USBPD_StatusTypeDef APP_EPR_RequestSrcCapa(uint8_t port);
+/** Send EPR_Mode(Enter); returns the real ST policy-engine status. */
+USBPD_StatusTypeDef APP_EPR_ModeEnter(uint8_t port);
+/** Send EPR_Mode(Exit); returns the real ST policy-engine status. */
+USBPD_StatusTypeDef APP_EPR_ModeExit(uint8_t port);
 #endif
+/** Human-readable USBPD_StatusTypeDef, for honest CLI reporting. */
+const char *APP_EPR_StatusName(int st);
 /** Called from APP_PD_OnNotify for the EPRMODE_* notifications. */
 void APP_EPR_OnNotify(uint32_t event);
 /** True when the local policy engine should set the RDO EPR-Mode-Capable bit. */
 uint8_t APP_EPR_ShouldRequest(void);
+/** Inspect SPR Source_Capabilities for the 5 V Fixed PDO EPR-capable bit. */
+void APP_EPR_OnSprSrcCaps(const uint32_t *pdo, uint32_t n);
 /** `epr` CLI command. */
 int APP_EPR_Cmd(int argc, char *argv[]);
 

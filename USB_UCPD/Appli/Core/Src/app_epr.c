@@ -207,10 +207,48 @@ USBPD_StatusTypeDef APP_EPR_RequestSrcCapa(uint8_t port)
   st = USBPD_PE_Send_ExtendeControlMessage(port,
                                            USBPD_EXTENDED_CONTROL_EPR_GETSRCCAPA);
   APP_EPR_Ctx.getsrc_st = (uint8_t)st;
-  APP_LOG_Printf("EPR: sent EPR_Get_Source_Cap (st=%d)\r\n", (int)st);
+  /* Report what the stack actually did, never "sent".  USBPD_OK here means
+   * the request was POSTED to the PE; the message only reaches CC if the PE
+   * is in an interruptible READY state with an explicit contract. */
+  APP_LOG_Printf("EPR_Get_Source_Cap: API status = %s (%d)%s\r\n",
+                 APP_EPR_StatusName(st), (int)st,
+                 (st == USBPD_OK) ? " -> queued to PE" : " -> NOT queued");
+  return st;
+}
+
+USBPD_StatusTypeDef APP_EPR_ModeEnter(uint8_t port)
+{
+  USBPD_StatusTypeDef st = USBPD_PE_Request_EPRModeEnter(port);
+  APP_EPR_Ctx.enter_st = (uint8_t)st;
+  APP_EPR_Ctx.enter_req_st = (uint8_t)st;
+  APP_LOG_Printf("EPR_Mode(Enter): API status = %s (%d)%s\r\n",
+                 APP_EPR_StatusName(st), (int)st,
+                 (st == USBPD_OK) ? " -> queued to PE" : " -> NOT queued");
+  return st;
+}
+
+USBPD_StatusTypeDef APP_EPR_ModeExit(uint8_t port)
+{
+  USBPD_StatusTypeDef st = USBPD_PE_Request_EPRModeExit(port);
+  APP_LOG_Printf("EPR_Mode(Exit): API status = %s (%d)%s\r\n",
+                 APP_EPR_StatusName(st), (int)st,
+                 (st == USBPD_OK) ? " -> queued to PE" : " -> NOT queued");
   return st;
 }
 #endif /* USBPDCORE_EPR */
+
+const char *APP_EPR_StatusName(int st)
+{
+  switch (st)
+  {
+    case 0:  return "USBPD_OK";
+    case 1:  return "USBPD_NOTSUPPORTED";
+    case 2:  return "USBPD_ERROR (PE state does not allow this operation)";
+    case 3:  return "USBPD_BUSY (not connected / no SPR explicit contract yet)";
+    case 4:  return "USBPD_TIMEOUT";
+    default: return "unknown";
+  }
+}
 
 void APP_EPR_OnSrcPdo(const uint8_t *ptr, uint32_t size)
 {
@@ -259,13 +297,12 @@ void APP_EPR_OnSrcPdo(const uint8_t *ptr, uint32_t size)
 #if defined(USBPDCORE_EPR) && (defined(USBPDCORE_SNK) || defined(USBPDCORE_DRP))
   /* THE ACTUAL MISSING WIRING.
    *
-   * usbpd_def.h:137-145 enables USBPDCORE_EPR together with SNK/DRP for the
-   * PD3_FULL build, so usbpd_pe_epr.o is compiled into the library and
-   * USBPD_PE_Request_EPRModeEnter() is declared in usbpd_core.h:1215.  Until
-   * now nothing in the application ever called it: the sink advertised its
-   * AVS PDO through the DPM data-info path but never asked the policy engine
-   * to enter EPR mode.  With an SPR-only source this was invisible; with an
-   * EPR-capable source it is the reason no EPR session starts.
+   * Reached once the source's EPR_Source_Capabilities have actually been
+   * parsed (i.e. we are already in EPR mode).  Normal first entry does NOT
+   * come through here - it is driven from APP_PD_Task() after the SPR
+   * explicit contract exists, because USBPD_PE_Request_EPRModeEnter() (see
+   * usbpd_pe.o +0x48e) requires Params & 0x704 == 0x300, i.e. PE_IsConnected
+   * plus an explicit contract in the sink power role.
    *
    * Only request entry when the source actually advertised AVS PDOs and the
    * operator has not disabled EPR.  Non-blocking: this posts a request to the
@@ -275,10 +312,7 @@ void APP_EPR_OnSrcPdo(const uint8_t *ptr, uint32_t size)
       (APP_EPR_Ctx.mode == 0u))
   {
     /* Source already told us it has AVS PDOs: go straight to mode entry. */
-    USBPD_StatusTypeDef st = USBPD_PE_Request_EPRModeEnter(0u);
-    APP_EPR_Ctx.enter_req_st = (uint8_t)st;
-    APP_LOG_Printf("EPR: source advertises AVS -> requested EPR mode entry (st=%d)\r\n",
-                   (int)st);
+    (void)APP_EPR_ModeEnter(0u);
   }
 #endif
 }
@@ -333,9 +367,44 @@ void APP_EPR_OnNotify(uint32_t event)
   }
 }
 
+void APP_EPR_OnSprSrcCaps(const uint32_t *pdo, uint32_t n)
+{
+  /* PD 3.1 6.4.1.2.2: the EPR Mode Capable bit (B23) is defined only in the
+   * FIRST (5 V Fixed) Source PDO and is the sink's ONLY legitimate way to
+   * learn that an attached source supports EPR while still in SPR mode.
+   *
+   * This is the second real defect.  Previously src_epr_capable was set only
+   * from received EPR *AVS* PDOs (APP_EPR_OnSrcPdo), which arrive in the
+   * EPR_Source_Capabilities message - and that message is only ever sent
+   * after EPR mode has been entered.  Entry in turn requires RDO bit 21,
+   * which APP_EPR_ShouldRequest() gated on src_epr_capable.  That circular
+   * dependency could never resolve, so even with a genuine EPR source the
+   * board stayed in SPR forever. */
+  APP_EPR_Ctx.src_spr_epr_capable = 0u;
+  if ((pdo == NULL) || (n == 0u))
+  {
+    return;
+  }
+  /* Must be a Fixed Supply PDO (B31..30 = 00b) to carry the flag. */
+  if ((pdo[0] & 0xC0000000u) != 0u)
+  {
+    return;
+  }
+  if ((pdo[0] & APP_EPR_SRC_FIXED_EPR_CAPABLE) != 0u)
+  {
+    APP_EPR_Ctx.src_spr_epr_capable = 1u;
+  }
+}
+
 uint8_t APP_EPR_ShouldRequest(void)
 {
-  return ((APP_EPR_Ctx.enable != 0u) && (APP_EPR_Ctx.src_epr_capable != 0u))
+  /* Set RDO B21 (EPR Mode Capable) whenever the local sink supports EPR and
+   * the source advertised EPR in its 5 V Fixed PDO.  The source Shall have
+   * seen this bit in the most recent Request before it will honour an
+   * EPR_Mode(Enter); see PD3.1 6.4.10.1. */
+  return ((APP_EPR_Ctx.enable != 0u) &&
+          ((APP_EPR_Ctx.src_spr_epr_capable != 0u) ||
+           (APP_EPR_Ctx.src_epr_capable != 0u)))
          ? 1u : 0u;
 }
 
@@ -353,7 +422,7 @@ int APP_EPR_Cmd(int argc, char *argv[])
   {
     if (sscanf(argv[2], "%u", &v) != 1)
     {
-      APP_LOG_Write("usage: epr [on|off|ceiling <mv>|want <mv>|status]\r\n");
+      APP_LOG_Write("usage: epr [on|off|caps|enter|exit|request|ceiling <mv>|want <mv>|status]\r\n");
       return 1;
     }
   }
@@ -384,10 +453,16 @@ int APP_EPR_Cmd(int argc, char *argv[])
   }
   else if (strcmp(argv[1], "enter") == 0)
   {
-    /* Step 2 (manual): ask the policy engine to enter EPR mode. */
-    USBPD_StatusTypeDef st = USBPD_PE_Request_EPRModeEnter(0u);
-    APP_EPR_Ctx.enter_req_st = (uint8_t)st;
-    APP_LOG_Printf("EPR mode entry requested (st=%d)\r\n", (int)st);
+    APP_EPR_Ctx.enable = 1u;
+    (void)APP_EPR_ModeEnter(0u);
+  }
+  else if (strcmp(argv[1], "exit") == 0)
+  {
+    (void)APP_EPR_ModeExit(0u);
+  }
+  else if (strcmp(argv[1], "caps") == 0)
+  {
+    (void)APP_EPR_RequestSrcCapa(0u);
   }
 #endif
   else if ((strcmp(argv[1], "ceiling") == 0) && (argc >= 3))
@@ -416,13 +491,22 @@ int APP_EPR_Cmd(int argc, char *argv[])
      * SPR-only source cannot supply EPR however large our AVS PDO is. */
     APP_LOG_Write("EPR\r\n");
     APP_LOG_Printf("  ST core    : PD3_FULL lib (usbpd_pe_epr.o)\r\n");
-    APP_LOG_Printf("  src advert : %s\r\n",
+    APP_LOG_Printf("  src 5V PDO EPR bit : %s\r\n",
+                   APP_EPR_Ctx.src_spr_epr_capable ? "SET (source is EPR capable)"
+                                                   : "clear (SPR-only source)");
+    APP_LOG_Printf("  src EPR AVS PDOs   : %s\r\n",
                    APP_EPR_Ctx.src_epr_capable
-                     ? "EPR advertised by connected source"
-                     : "NOT advertised by connected source (SPR only)");
+                     ? "received (EPR_Source_Capabilities seen)"
+                     : "none received yet");
+    APP_LOG_Printf("  RDO B21 EPR_Capable: %s\r\n",
+                   APP_EPR_ShouldRequest() ? "will be set" : "will be clear");
+    APP_LOG_Printf("  last Enter status  : %s\r\n",
+                   APP_EPR_StatusName((int)APP_EPR_Ctx.enter_st));
+    APP_LOG_Printf("  last GetSrcCap st  : %s\r\n",
+                   APP_EPR_StatusName((int)APP_EPR_Ctx.getsrc_st));
     APP_LOG_Printf("  mode       : %s\r\n", APP_EPR_Ctx.mode ? "EPR" : "SPR");
     APP_LOG_Printf("  verdict    : %s\r\n",
-                   APP_EPR_Ctx.src_epr_capable
+                   (APP_EPR_Ctx.src_spr_epr_capable || APP_EPR_Ctx.src_epr_capable)
                      ? (APP_EPR_Ctx.mode ? "EPR contract active"
                                          : "EPR available, not entered")
                      : "EPR unavailable on this session");
