@@ -171,6 +171,31 @@ typedef struct
 extern USBPD_DbgCounters_t g_usbpd_dbg;
 
 /**
+  * @brief  One-shot EPR freeze telemetry.
+  *
+  * The app arms g_usbpd_tele = 1 the moment `epr enter` is accepted by the PE
+  * (and clears it again on success/failure/timeout).  While armed, the device
+  * layer and the DPM core emit tiny ">X" checkpoints straight to the USART1
+  * trace UART using register writes only (no CDC, no trace ring, no heap), so
+  * a total system freeze still leaves a trail showing exactly where execution
+  * stopped: PE-run entry (>B), PE-run exit (>E), UCPD TX armed (>T), TX sent
+  * (>S), TX discarded (>D), TX aborted (>A), RX message end (>R), DMA stop
+  * timeout (>TMO).  The main loop also emits a 1 Hz >L alive tick while armed.
+  * Normal operation is completely unaffected: nothing is emitted until the
+  * app sets the latch.
+  */
+extern volatile uint8_t g_usbpd_tele;
+
+/**
+  * @brief  Raw checkpoint output on the USART1 trace UART (register level).
+  * @param  s NUL-terminated string (kept short, e.g. "\r\n>B\r\n").
+  * @retval None.  Bounded: never waits more than a short poll per character,
+  *         so it is safe from IRQ context and safe even if the UART clock or
+  *         the DMA tracer is in a bad state.
+  */
+void USBPD_HW_IF_Tele(const char *s);
+
+/**
   * @}
   */
 

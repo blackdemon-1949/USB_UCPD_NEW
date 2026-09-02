@@ -65,6 +65,13 @@
 
 /* Private function prototypes -----------------------------------------------*/
 static void MPU_Config(void);
+
+/* EPR-freeze telemetry: latch + raw trace-UART writer live in the USBPD
+ * device layer (usbpd_hw_if_it.c).  The main loop below emits a 1 Hz >L
+ * alive tick while the latch is armed, so a freeze that leaves the loop
+ * running is distinguishable from a total stop on the trace terminal. */
+extern volatile uint8_t g_usbpd_tele;
+extern void USBPD_HW_IF_Tele(const char *s);
 /* USER CODE BEGIN PFP */
 static void Appli_Fail(uint8_t code);
 /* USER CODE END PFP */
@@ -512,6 +519,27 @@ int main(void)
     APP_CLI_Poll();
     APP_LOG_Flush();
     APP_LED_Task();
+
+    /* EPR-freeze telemetry alive tick: one >L per second while armed,
+     * auto-disarm after 20 s so a hung EPR attempt cannot spam the trace
+     * UART for ever. */
+    if (g_usbpd_tele != 0u)
+    {
+      static uint32_t s_tele_last;
+      static uint32_t s_tele_age;
+      uint32_t t = HAL_GetTick();
+
+      if ((uint32_t)(t - s_tele_last) >= 1000u)
+      {
+        s_tele_last = t;
+        s_tele_age++;
+        USBPD_HW_IF_Tele("\r\n>L\r\n");
+        if (s_tele_age >= 20u)
+        {
+          g_usbpd_tele = 0u;
+        }
+      }
+    }
   }
   /* USER CODE END 3 */
 }

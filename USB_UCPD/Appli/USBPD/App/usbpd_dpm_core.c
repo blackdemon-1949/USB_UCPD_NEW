@@ -26,6 +26,7 @@
 #include "usbpd_dpm_core.h"
 #include "usbpd_dpm_conf.h"
 #include "usbpd_dpm_user.h"
+#include "usbpd_hw_if.h"
 #include "main.h"
 
 #if defined(_LOW_POWER)
@@ -411,8 +412,21 @@ void USBPD_DPM_Run(void)
   {
     if ((HAL_GetTick() - DPM_Sleep_start[port]) >= DPM_Sleep_time[port])
     {
+      /* EPR-freeze telemetry: one-shot checkpoints on the trace UART while
+       * the app has g_usbpd_tele armed (set when `epr enter` is accepted).
+       * >B before the PE run, >E only if the PE run returns.  A freeze
+       * inside the closed PE/PRL code therefore leaves ">B" with no ">E".
+       */
+      if (g_usbpd_tele != 0u)
+      {
+        USBPD_HW_IF_Tele("\r\n>B\r\n");
+      }
       DPM_Sleep_time[port] = USBPD_PE_StateMachine_SNK(port);
       DPM_Sleep_start[port] = HAL_GetTick();
+      if (g_usbpd_tele != 0u)
+      {
+        USBPD_HW_IF_Tele("\r\n>E\r\n");
+      }
     }
   }
 

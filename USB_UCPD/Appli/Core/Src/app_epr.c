@@ -7,6 +7,15 @@
 #include "app_cable.h"
 #if APP_ENG_EPR
 #include "usbpd_core.h"
+#if defined(APP_EPR_HOSTTEST)
+/* Host test build: no device layer, telemetry compiled out. */
+#define EPR_TELE_ARM()      ((void)0)
+#define EPR_TELE_DISARM()   ((void)0)
+#else
+#include "usbpd_hw_if.h"
+#define EPR_TELE_ARM()      (g_usbpd_tele = 1u)
+#define EPR_TELE_DISARM()   (g_usbpd_tele = 0u)
+#endif
 #endif
 /* The boundary probe reads the same two structures the ST library
  * dereferences (DPM_Settings for the EPR gate, DPM_Params for the contract
@@ -531,6 +540,10 @@ USBPD_StatusTypeDef APP_EPR_ModeEnter(uint8_t port)
 
   if (st == USBPD_OK)
   {
+    /* Arm the reply watchdog and the one-shot trace-UART telemetry that
+     * pinpoints where a freeze happens (PE run >B/>E, UCPD >T/>S, >L alive
+     * tick).  Disarmed again on reply/timeout below. */
+    EPR_TELE_ARM();
     /* Arm the reply watchdog.  "Queued" is not "entered": the partner still
      * has to answer with Enter Acknowledged / Succeeded / Failed.  Without
      * this the console would sit for ever showing a request that the source
@@ -569,6 +582,7 @@ void APP_EPR_PollEnter(void)
   }
 
   APP_EPR_Ctx.enter_pending = 0u;
+  EPR_TELE_DISARM();
   APP_EPR_Ctx.n_failed++;
   APP_LOG_Printf("EPR_Mode(Enter): NO REPLY from source within %u ms - "
                  "entry did not happen (source ignored the request)\r\n",
@@ -809,12 +823,14 @@ void APP_EPR_OnNotify(uint32_t event)
       break;
 
     case APP_EPR_NOTIFY_MODE_SUCCEEDED:
+      EPR_TELE_DISARM();
       APP_EPR_Ctx.entered = 1u;
       APP_EPR_Ctx.mode = 1u;
       APP_EPR_Ctx.last_action = APP_EPR_ACT_ENTER_SUCCEEDED;
       break;
 
     case APP_EPR_NOTIFY_MODE_FAILED:
+      EPR_TELE_DISARM();
       APP_EPR_Ctx.n_failed++;
       APP_EPR_Ctx.entered = 0u;
       APP_EPR_Ctx.mode = 0u;
@@ -823,6 +839,7 @@ void APP_EPR_OnNotify(uint32_t event)
       break;
 
     case APP_EPR_NOTIFY_MODE_EXIT:
+      EPR_TELE_DISARM();
       APP_EPR_Ctx.n_exit++;
       APP_EPR_Ctx.entered = 0u;
       APP_EPR_Ctx.mode = 0u;

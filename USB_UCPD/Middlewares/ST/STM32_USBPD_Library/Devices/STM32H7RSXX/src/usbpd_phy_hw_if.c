@@ -139,6 +139,10 @@ uint32_t USBPD_HW_IF_DMAStop(DMA_Channel_TypeDef *hdma, uint8_t is_rx)
   }
   g_usbpd_dbg.dma_stop_ccr  = hdma->CCR;
   g_usbpd_dbg.dma_stop_cbr1 = hdma->CBR1;
+  if (g_usbpd_tele != 0u)
+  {
+    USBPD_HW_IF_Tele("\r\n>TMO\r\n");
+  }
 
   SET_BIT(hdma->CCR, DMA_CCR_RESET);
   guard = USBPD_DMA_STOP_MAX_POLL;
@@ -265,6 +269,10 @@ USBPD_StatusTypeDef USBPD_HW_IF_SendBuffer(uint8_t PortNum, USBPD_SOPType_TypeDe
          * the PRL layer times the lost message out and retries later. */
         if (USBPD_HW_IF_DMAStop(Ports[PortNum].hdmatx, 0u) == 2UL)
         {
+          if (g_usbpd_tele != 0u)
+          {
+            USBPD_HW_IF_Tele("\r\n>X\r\n");
+          }
           return USBPD_ERROR;
         }
 
@@ -275,6 +283,10 @@ USBPD_StatusTypeDef USBPD_HW_IF_SendBuffer(uint8_t PortNum, USBPD_SOPType_TypeDe
 
         LL_UCPD_WriteTxPaySize(Ports[PortNum].husbpd, Size);
         LL_UCPD_SendMessage(Ports[PortNum].husbpd);
+        if (g_usbpd_tele != 0u)
+        {
+          USBPD_HW_IF_Tele("\r\n>T\r\n");
+        }
       }
     }
   }

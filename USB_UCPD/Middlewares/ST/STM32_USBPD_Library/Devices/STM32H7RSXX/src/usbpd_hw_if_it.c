@@ -32,6 +32,41 @@ static void USBPD_CacheInvalidateRx(const void *address, uint32_t size)
 
 /* Diagnostic counters, dumped by the CLI `pd` command. */
 USBPD_DbgCounters_t g_usbpd_dbg;
+
+/* One-shot EPR freeze telemetry latch, see usbpd_hw_if.h. */
+volatile uint8_t g_usbpd_tele = 0u;
+
+#define USBPD_TELE_TXE_GUARD  5000u
+#define USBPD_TELE(s)         do { if (g_usbpd_tele != 0u) { USBPD_HW_IF_Tele(s); } } while (0u)
+
+void USBPD_HW_IF_Tele(const char *s)
+{
+  uint32_t guard;
+
+  if (s == NULL)
+  {
+    return;
+  }
+  while (*s != '\0')
+  {
+    guard = USBPD_TELE_TXE_GUARD;
+    while (((USART1->ISR & USART_ISR_TXE) == 0u) && (guard != 0u))
+    {
+      guard--;
+    }
+    if (guard == 0u)
+    {
+      return;              /* UART unavailable: never hang the caller */
+    }
+    USART1->TDR = (uint8_t)*s;
+    s++;
+  }
+  guard = USBPD_TELE_TXE_GUARD;
+  while (((USART1->ISR & USART_ISR_TC) == 0u) && (guard != 0u))
+  {
+    guard--;
+  }
+}
 #if defined(_LOW_POWER)
 #include "usbpd_lowpower.h"
 #endif /* _LOW_POWER */
@@ -68,6 +103,7 @@ void PORTx_IRQHandler(uint8_t PortNum)
       g_usbpd_dbg.txmsgdisc++;
       /* Message has been discarded */
       LL_UCPD_ClearFlag_TxMSGDISC(hucpd);
+      USBPD_TELE("\r\n>D\r\n");
       /* Bounded stop: never spin forever in IRQ context (see
        * USBPD_HW_IF_DMAStop).  The transfer is over/discarded either way;
        * the PRL layer handles the lost message. */
@@ -82,6 +118,7 @@ void PORTx_IRQHandler(uint8_t PortNum)
       /* Message has been fully transferred */
       LL_UCPD_ClearFlag_TxMSGSENT(hucpd);
       (void)USBPD_HW_IF_DMAStop(Ports[PortNum].hdmatx, 0u);
+      USBPD_TELE("\r\n>S\r\n");
       Ports[PortNum].cbs.USBPD_HW_IF_TxCompleted(PortNum, 0);
 
 #if defined(_LOW_POWER)
@@ -95,6 +132,7 @@ void PORTx_IRQHandler(uint8_t PortNum)
       g_usbpd_dbg.txmsgabt++;
       LL_UCPD_ClearFlag_TxMSGABT(hucpd);
       (void)USBPD_HW_IF_DMAStop(Ports[PortNum].hdmatx, 0u);
+      USBPD_TELE("\r\n>A\r\n");
       Ports[PortNum].cbs.USBPD_HW_IF_TxCompleted(PortNum, 2);
       return;
     }
@@ -188,6 +226,7 @@ void PORTx_IRQHandler(uint8_t PortNum)
         /* Enable the DMA */
         SET_BIT(Ports[PortNum].hdmarx->CCR, DMA_CCR_EN);
       }
+      USBPD_TELE("\r\n>R\r\n");
 #if defined(_LOW_POWER)
       UTIL_LPM_SetStopMode(0 == PortNum ? LPM_PE_0 : LPM_PE_1, UTIL_LPM_ENABLE);
 #endif /* _LOW_POWER */
