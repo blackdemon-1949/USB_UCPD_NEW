@@ -234,6 +234,16 @@ void APP_PD_Task(void)
   APP_EPR_PollTx(0U);
   APP_EPR_PollEnter();
 
+  /* Deferred EPR entry requested from a PE callback (APP_EPR_OnSrcPdo).
+   * Performed here, in task context, so the policy engine is never re-entered
+   * from its own call stack. */
+  if ((APP_EPR_Ctx.enter_wanted != 0u) && (APP_EPR_Ctx.mode == 0u) &&
+      (DPM_Params[0].PE_Power == USBPD_POWER_EXPLICITCONTRACT))
+  {
+    APP_EPR_Ctx.enter_wanted = 0u;
+    (void)APP_EPR_ModeEnter(0U);
+  }
+
   /* Refresh the e-marker derived 5 A flag here, in task context.  It must not
    * be done from USBPD_DPM_GetDataInfo, which runs inside the PE. */
   APP_EPR_RefreshCable();

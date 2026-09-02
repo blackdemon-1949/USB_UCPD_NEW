@@ -39,7 +39,13 @@ ENTRY(Reset_Handler)
 _estack = ORIGIN(DTCM) + LENGTH(DTCM); /* end of "DTCM" Ram type memory */
 
 _Min_Heap_Size = 0x4000; /* USBPD stack + CDC CLI (malloc'd PD DMA buffers live here) */
-_Min_Stack_Size = 0x1000;
+/* 8 KB, raised from 4 KB.  The EPR path is the deepest call chain in this
+ * firmware: USBPD_PE_StateMachine_SNK -> EPRMode_Enter -> DPM callbacks,
+ * on top of which the application logger uses a 256-byte stack buffer per
+ * APP_LOG_Printf.  DTCM is 64 KB and only the stack lives there, so the
+ * extra 4 KB is free.  A stack overflow here lands in a while(1) fault
+ * handler, which on the bench is indistinguishable from a bricked board. */
+_Min_Stack_Size = 0x2000;
 
 __FLASH_BEGIN  = 0x90000000;
 __FLASH_SIZE   = 0x00800000; /* PY25Q64HA: 64 Mbit = 8 MByte */

@@ -146,6 +146,7 @@ typedef struct
   uint32_t last_mode_do;    /* raw EPRMDO last received from the partner   */
   uint8_t  cable_5a;        /* 1 = e-marker confirmed a 5 A cable          */
   uint8_t  enter_pending;   /* EPR_Mode(Enter) queued, reply not seen yet  */
+  uint8_t  enter_wanted;    /* deferred entry request, serviced in task ctx */
   uint32_t enter_deadline;  /* tick by which the reply must arrive         */
   uint8_t  getsrc_pending;  /* request accepted by PE, wire outcome unknown */
   uint8_t  getsrc_txd;      /* 1 = a UCPD TX was actually observed after it */

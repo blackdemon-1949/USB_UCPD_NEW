@@ -90,7 +90,12 @@ void NMI_Handler(void)
 void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
-
+  /* A silent while(1) here is indistinguishable from a bricked board: on the
+   * bench a fault looked like the firmware had died, survived unplugging the
+   * source, and needed the physical reset button with no clue as to why.
+   * Blink the LED forever with a distinct code and park the fault registers
+   * where a debugger can read them, so a fault is diagnosable. */
+  APP_FaultReport(2u);
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
   {
@@ -105,7 +110,7 @@ void HardFault_Handler(void)
 void MemManage_Handler(void)
 {
   /* USER CODE BEGIN MemoryManagement_IRQn 0 */
-
+  APP_FaultReport(3u);
   /* USER CODE END MemoryManagement_IRQn 0 */
   while (1)
   {
@@ -120,7 +125,7 @@ void MemManage_Handler(void)
 void BusFault_Handler(void)
 {
   /* USER CODE BEGIN BusFault_IRQn 0 */
-
+  APP_FaultReport(4u);
   /* USER CODE END BusFault_IRQn 0 */
   while (1)
   {
@@ -135,7 +140,7 @@ void BusFault_Handler(void)
 void UsageFault_Handler(void)
 {
   /* USER CODE BEGIN UsageFault_IRQn 0 */
-
+  APP_FaultReport(5u);
   /* USER CODE END UsageFault_IRQn 0 */
   while (1)
   {

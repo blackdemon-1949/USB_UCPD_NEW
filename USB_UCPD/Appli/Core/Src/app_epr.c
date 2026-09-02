@@ -641,8 +641,18 @@ void APP_EPR_OnSrcPdo(const uint8_t *ptr, uint32_t size)
       (APP_EPR_Ctx.enable != 0u) &&
       (APP_EPR_Ctx.mode == 0u))
   {
-    /* Source already told us it has AVS PDOs: go straight to mode entry. */
-    (void)APP_EPR_ModeEnter(0u);
+    /* DO NOT call into the policy engine from here.
+     *
+     * This function runs inside USBPD_DPM_SetDataInfo, i.e. on the PE's own
+     * call stack while it is processing a received message.  Calling
+     * USBPD_PE_Request_EPRModeEnter() from that context re-enters the state
+     * machine it is already executing and corrupts its AMS bookkeeping - on
+     * the bench that showed up as a hard lock that survived unplugging the
+     * source and needed the physical reset button (every fault handler in
+     * this project is a while(1), so a fault looks exactly like a brick).
+     *
+     * Just raise a flag; APP_PD_Task() performs the entry in task context. */
+    APP_EPR_Ctx.enter_wanted = 1u;
   }
 #endif
 }

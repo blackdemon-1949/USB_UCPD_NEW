@@ -149,11 +149,12 @@ static const APP_CMD_t s_cmds[] =
     "PPS windows, operating-point validation, RDO construction",
     APP_PPS_Cmd },
 
-#if APP_ENG_ANALYTICS
-    { "temp", "temp [status|clear]",
+  /* DTS temperature is a requested bench feature and does not belong to the
+   * optional analytics engine.  APP_TEMP_Poll() (the statistics accumulator)
+   * is what ANALYTICS gates; reading the sensor on demand is always available. */
+  { "temp", "temp [status|clear]",
     "DTS temperature: current, min, max, average",
     APP_TEMP_Cmd },
-#endif
 
   { "integ", "integ [status|crc [text]|sha256 [text]|session|rng]",
     "hardware CRC, SHA-256 fingerprints and RNG",

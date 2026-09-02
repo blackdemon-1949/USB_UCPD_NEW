@@ -52,6 +52,8 @@ extern "C" {
 
 /* Exported functions prototypes ---------------------------------------------*/
 void Error_Handler(void);
+/* Latch fault registers and blink a fault code (2=Hard 3=MemManage 4=Bus 5=Usage). */
+void APP_FaultReport(uint32_t code);
 
 /* USER CODE BEGIN EFP */
 /* Visible fatal error: blink PB2 `code` times, pause, repeat (never returns).

@@ -92,6 +92,31 @@ static void Appli_Fail(uint8_t code)
   }
 }
 
+/**
+  * @brief  Report a CPU fault: latch the fault registers and blink @p code.
+  *
+  * Called from the fault handlers before their while(1).  Without this a
+  * fault is a silent lock-up that looks exactly like dead hardware - the
+  * bench symptom of "bricked until I press reset".  The globals are kept
+  * volatile and non-static so a debugger can read them after the fact.
+  *   2 = HardFault  3 = MemManage  4 = BusFault  5 = UsageFault
+  */
+volatile uint32_t APP_FaultCFSR;
+volatile uint32_t APP_FaultHFSR;
+volatile uint32_t APP_FaultMMAR;
+volatile uint32_t APP_FaultBFAR;
+volatile uint32_t APP_FaultCode;
+
+void APP_FaultReport(uint32_t code)
+{
+  APP_FaultCode = code;
+  APP_FaultCFSR = SCB->CFSR;
+  APP_FaultHFSR = SCB->HFSR;
+  APP_FaultMMAR = SCB->MMFAR;
+  APP_FaultBFAR = SCB->BFAR;
+  Appli_Fail((uint8_t)code);
+}
+
 /** Public wrapper so middleware (usbpd.c) can report a fatal init error
  *  with a visible LED code instead of hanging silently in while(1). */
 void Appli_Fatal(uint8_t code)
@@ -159,9 +184,9 @@ int main(void)
 #if APP_ENG_EPR
   APP_EPR_Init();
 #endif
-#if APP_ENG_ANALYTICS
+  /* DTS: always started.  'temp' is a requested bench feature; only the
+   * periodic statistics accumulation belongs to APP_ENG_ANALYTICS. */
   APP_TEMP_Init();
-#endif
 #if APP_ENG_STORE
   APP_STORE_Init();
 #endif
