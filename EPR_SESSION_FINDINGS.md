@@ -100,6 +100,47 @@ Yet the console does not answer. That combination points to one of:
 The three mechanisms are cleanly separated by the **serial-isolation
 experiment** below.
 
+
+## 2026-09-03 second report + one-shot trace telemetry (build 508e200)
+
+User re-tested the bounded-DMA build on the bench: **identical freeze** - after
+`EPR_Mode(Enter): API status = USBPD_OK` prints, the whole system becomes
+unresponsive, no further CDC output and no USART1/trace output.  Bounding the
+DMA stop spins therefore ruled that class out (or it is not the only class).
+Every in-repo component of the path (CLI, EPR app state, DPM data callbacks,
+log ring, PE wakeup, UCPD ISR) has now been audited clean; the remaining
+unknown is inside the closed PE/PRL library run that transmits the EPR AMS.
+
+To capture where execution actually stops, build **508e200** arms a one-shot
+latch the instant `epr enter` is accepted, and the device/DPM layers then emit
+raw register-level checkpoints on the USART1 trace UART (921600, PB6/PB7):
+
+| Mark | Meaning |
+|---|---|
+| >B   | PE state-machine run entered |
+| >E   | PE run returned |
+| >T   | UCPD TX armed (DMA enabled, send kicked) |
+| >S   | TX complete (TXMSGSENT) |
+| >D   | TX discarded |
+| >A   | TX aborted |
+| >R   | RX message completed |
+| >X / >TMO | DMA stop hard-failed / timed out |
+| >L   | main loop alive tick, 1 Hz (auto-disarms after 20 s) |
+| ***FAULT | vector fault (existing capture) |
+
+Nothing is emitted until the latch is armed, so normal runs are unaffected;
+host tests keep the telemetry compiled out.  **Decode rules for the freeze:**
+
+- `>B` then silence -> the PE run never returns (closed-lib hang) and the
+  main loop is dead (no >L).
+- `>B >E` then silence -> the PE run is NOT the killer; death is later in the
+  same loop pass (look at APP_PD_Task / CDC).
+- `>B >T` (no >S/>D/>A) -> the UCPD TX never completes/aborts.
+- `>B >T >S` -> the frame went out; freeze is in the reply-wait/next step.
+- `>L` keeps printing but console is dead -> the main loop is alive; the
+  freeze is in the console path, not the PD stack.
+- LED behaviour at the freeze is still worth noting (blink count per 10 s).
+
 ## Facts established
 
 - `epr enter` executes in the **main loop** (CDC CLI poll), not in an ISR.
