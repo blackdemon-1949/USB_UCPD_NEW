@@ -162,6 +162,10 @@ typedef struct
   volatile uint32_t txund;         /*!< TX underrun                                      */
   volatile uint16_t last_rx_hdr;   /*!< Message header of the last RX message (16-bit, LE) */
   volatile uint8_t  last_rx_sop;   /*!< Ordered-set code of the last RX message          */
+  volatile uint32_t dma_tx_stop_tmo; /*!< TX DMA stop did not clear EN within the poll budget */
+  volatile uint32_t dma_rx_stop_tmo; /*!< RX DMA stop did not clear EN within the poll budget */
+  volatile uint32_t dma_stop_ccr;    /*!< CCR snapshot at the last DMA stop timeout       */
+  volatile uint32_t dma_stop_cbr1;   /*!< CBR1 snapshot at the last DMA stop timeout      */
 } USBPD_DbgCounters_t;
 
 extern USBPD_DbgCounters_t g_usbpd_dbg;
@@ -379,6 +383,27 @@ void    USBPD_HW_IF_EnableRX(uint8_t PortNum);
   * @retval None
   */
 void    USBPD_HW_IF_DisableRX(uint8_t PortNum);
+
+/**
+  * @brief  Stop a UCPD DMA channel with a bounded wait.
+  *
+  * The stock driver stops TX/RX DMA with `SET_BIT(CCR, SUSP | RESET)` and
+  * then spins on `while (CCR & EN)` forever.  GPDMA clears EN once the
+  * suspend/reset completes at the next transfer boundary; if the channel is
+  * waiting on a request line that never resumes, EN stays set and the
+  * unbounded spin freezes the whole system (no fault, no console, IRQs
+  * blocked) - the bench symptom seen when an EPR-mode AMS transmission is
+  * interrupted.  This variant bounds the wait, force-resets the channel once
+  * and latches diagnostics into g_usbpd_dbg, so a wedged channel can never
+  * hang the system again and the `board` CLI command reports it.
+  *
+  * @param  hdma  The DMA channel (Ports[x].hdmatx or hdmarx).
+  * @param  is_rx 1 for the RX channel, 0 for TX (selects the diag counter).
+  * @retval 0 = EN cleared normally; 1 = EN cleared only after a forced
+  *         channel reset; 2 = EN still set after the forced reset
+  *         (channel wedged; do not re-arm it).
+  */
+uint32_t USBPD_HW_IF_DMAStop(DMA_Channel_TypeDef *hdma, uint8_t is_rx);
 
 /**
   * @}

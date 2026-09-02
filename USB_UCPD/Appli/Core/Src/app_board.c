@@ -128,4 +128,9 @@ void APP_BOARD_PrintUcpd(void)
                  (unsigned long)g_usbpd_dbg.txhrstsent,
                  (unsigned long)g_usbpd_dbg.txmsgabt,
                  (unsigned long)g_usbpd_dbg.txund);
+  APP_LOG_Printf("dma stop tmo: tx=%lu rx=%lu  last CCR=0x%08lX CBR1=0x%04lX\\r\\n",
+                 (unsigned long)g_usbpd_dbg.dma_tx_stop_tmo,
+                 (unsigned long)g_usbpd_dbg.dma_rx_stop_tmo,
+                 (unsigned long)g_usbpd_dbg.dma_stop_ccr,
+                 (unsigned long)g_usbpd_dbg.dma_stop_cbr1);
 }

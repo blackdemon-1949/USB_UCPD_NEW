@@ -68,8 +68,10 @@ void PORTx_IRQHandler(uint8_t PortNum)
       g_usbpd_dbg.txmsgdisc++;
       /* Message has been discarded */
       LL_UCPD_ClearFlag_TxMSGDISC(hucpd);
-      SET_BIT(Ports[PortNum].hdmatx->CCR, DMA_CCR_SUSP | DMA_CCR_RESET);
-      while ((Ports[PortNum].hdmatx->CCR & DMA_CCR_EN) == DMA_CCR_EN);
+      /* Bounded stop: never spin forever in IRQ context (see
+       * USBPD_HW_IF_DMAStop).  The transfer is over/discarded either way;
+       * the PRL layer handles the lost message. */
+      (void)USBPD_HW_IF_DMAStop(Ports[PortNum].hdmatx, 0u);
       Ports[PortNum].cbs.USBPD_HW_IF_TxCompleted(PortNum, 1);
       return;
     }
@@ -79,8 +81,7 @@ void PORTx_IRQHandler(uint8_t PortNum)
       g_usbpd_dbg.txmsgsent++;
       /* Message has been fully transferred */
       LL_UCPD_ClearFlag_TxMSGSENT(hucpd);
-      SET_BIT(Ports[PortNum].hdmatx->CCR, DMA_CCR_SUSP | DMA_CCR_RESET);
-      while ((Ports[PortNum].hdmatx->CCR & DMA_CCR_EN) == DMA_CCR_EN);
+      (void)USBPD_HW_IF_DMAStop(Ports[PortNum].hdmatx, 0u);
       Ports[PortNum].cbs.USBPD_HW_IF_TxCompleted(PortNum, 0);
 
 #if defined(_LOW_POWER)
@@ -93,8 +94,7 @@ void PORTx_IRQHandler(uint8_t PortNum)
     {
       g_usbpd_dbg.txmsgabt++;
       LL_UCPD_ClearFlag_TxMSGABT(hucpd);
-      SET_BIT(Ports[PortNum].hdmatx->CCR, DMA_CCR_SUSP | DMA_CCR_RESET);
-      while ((Ports[PortNum].hdmatx->CCR &  DMA_CCR_EN) == DMA_CCR_EN);
+      (void)USBPD_HW_IF_DMAStop(Ports[PortNum].hdmatx, 0u);
       Ports[PortNum].cbs.USBPD_HW_IF_TxCompleted(PortNum, 2);
       return;
     }
@@ -175,16 +175,19 @@ void PORTx_IRQHandler(uint8_t PortNum)
          the number of data received by UCPD */
       LL_UCPD_ClearFlag_RxMsgEnd(hucpd);
 
-      /* Disable DMA */
-      SET_BIT(Ports[PortNum].hdmarx->CCR, DMA_CCR_SUSP | DMA_CCR_RESET);
-      while ((Ports[PortNum].hdmarx->CCR & DMA_CCR_EN) == DMA_CCR_EN);
+      /* Disable DMA - bounded: a wedged RX channel must not hang the UCPD
+       * IRQ forever.  If even the forced reset cannot clear EN (2) the
+       * channel is dead: do not re-arm it, the `board` dump will show the
+       * timeout counters and the last CCR/CBR1 snapshot. */
+      if (USBPD_HW_IF_DMAStop(Ports[PortNum].hdmarx, 1u) != 2UL)
+      {
+        /* Ready for next transaction */
+        WRITE_REG(Ports[PortNum].hdmarx->CDAR, (uint32_t)Ports[PortNum].ptr_RxBuff);
+        MODIFY_REG(Ports[PortNum].hdmarx->CBR1, DMA_CBR1_BNDT, (SIZE_MAX_PD_TRANSACTION_UNCHUNK & DMA_CBR1_BNDT));
 
-      /* Ready for next transaction */
-      WRITE_REG(Ports[PortNum].hdmarx->CDAR, (uint32_t)Ports[PortNum].ptr_RxBuff);
-      MODIFY_REG(Ports[PortNum].hdmarx->CBR1, DMA_CBR1_BNDT, (SIZE_MAX_PD_TRANSACTION_UNCHUNK & DMA_CBR1_BNDT));
-
-      /* Enable the DMA */
-      SET_BIT(Ports[PortNum].hdmarx->CCR, DMA_CCR_EN);
+        /* Enable the DMA */
+        SET_BIT(Ports[PortNum].hdmarx->CCR, DMA_CCR_EN);
+      }
 #if defined(_LOW_POWER)
       UTIL_LPM_SetStopMode(0 == PortNum ? LPM_PE_0 : LPM_PE_1, UTIL_LPM_ENABLE);
 #endif /* _LOW_POWER */

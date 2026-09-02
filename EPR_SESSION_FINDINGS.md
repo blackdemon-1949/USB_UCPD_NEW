@@ -8,6 +8,46 @@
 > alive). This document tracks the current best model and the exact
 > discriminator experiment for the next bench round.
 
+## 2026-09-03 fix — bounded UCPD DMA stop (system-freeze class)
+
+**Change:** the stock device layer stops the UCPD TX/RX DMA channels with
+`SET_BIT(CCR, SUSP | RESET)` followed by an **unbounded**
+`while (CCR & EN);` spin. That spin exists in `USBPD_HW_IF_SendBuffer()`
+(PE-task context, i.e. inside `USBPD_DPM_Run()` while the main loop runs the
+`epr enter` AMS) and in the UCPD1 IRQ handler (`usbpd_hw_if_it.c`,
+TXMSGDISC/TXMSGSENT/TXMSGABT and RXMSGEND). If a GPDMA channel is waiting on
+a request line that never resumes, EN never clears and the spin **freezes the
+whole system forever** — no vector fault, no console, IRQs blocked, exactly
+the bench symptom.
+
+All those spins are now routed through `USBPD_HW_IF_DMAStop()`: bounded poll
+(~1 ms), one forced channel reset, and diagnostic latching. A wedged channel
+can no longer hang the system:
+
+- TX stop timeout → counters `dma_tx_stop_tmo` / `dma_rx_stop_tmo` increment,
+  last `CCR`/`CBR1` are snapshotted (`dma_stop_ccr`, `dma_stop_cbr1`), and the
+  layer reports the transfer failed so the PRL protocol layer retries on its
+  own timers instead of freezing.
+- RX stop timeout → the received message is still delivered to the stack;
+  re-arming the next RX is skipped only if the channel is truly wedged.
+- All counters are printed by the **`pd`** console command (new last line).
+
+**Bench verification of this build (branch `arena/01a06344-usb-ucpd-new`, tip
+after this commit):**
+
+1. Build + flash the Appli. `pd` should show `dma stop tmo: tx=0 rx=0`.
+2. Attach a source, get an explicit contract (LED solid), type `epr enter`.
+   - **If the board no longer freezes** (console answers, `pd` shows
+     `dma stop tmo: tx=N` or `rx=N` with nonzero `last CCR`): the freeze was
+     the DMA EN hang — root cause confirmed and fixed.
+   - **If the board still freezes exactly as before**: the DMA-stop is not the
+     (only) mechanism. Watch the USART1 trace terminal during the freeze for
+     a `***FAULT` line, and after reset watch the CDC console for
+     `*** PREVIOUS RUN FAULTED`; report both verbatim. Also run the
+     "serial-isolation" experiment in the section below.
+3. Regression: SPR/PPS/CDC/INA226 flows must remain normal; host gate stays
+   149/149.
+
 ## TL;DR of the current model
 
 The stack and the application code around `epr enter` are all clean and
