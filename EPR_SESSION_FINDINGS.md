@@ -1,107 +1,150 @@
-# EPR crash — session findings & the missing discriminator
+# EPR `epr enter` System Freeze — Session Findings
 
-Branch `arena/01a06344-usb-ucpd-new`. Commit `790fbd2`.
+> **Update 2026-09-03 (source-independent finding):** the freeze is **not** an
+> EPR-charger/VCONN/cable-discovery artifact. It reproduces on **any** source
+> (EPR-capable or plain SPR) the instant the `epr enter` command is sent while
+> an explicit SPR contract is active. It does **not** happen when nothing is
+> attached (`epr enter` then returns `USBPD_BUSY` cleanly and the console stays
+> alive). This document tracks the current best model and the exact
+> discriminator experiment for the next bench round.
 
-## What this session established
+## TL;DR of the current model
 
-### 1. The EPR fault record — why it never printed (now fixed)
+The stack and the application code around `epr enter` are all clean and
+non-blocking **except** for the closed-library PE/PRL TX path that actually
+transmits the queued `EPR_Mode(Enter)` AMS. Everything observable points at a
+failure **inside that transmit / PE state-machine run**, not at a plain
+vector-table crash:
 
-The one instrument that would end the guessing — the boot-time
-"PREVIOUS RUN FAULTED" report — was broken by **three independent
-defects**:
+| Observable | Value | What it rules in/out |
+|---|---|---|
+| `epr enter` with **no source** | clean `USBPD_BUSY`, console alive | crash needs an attached source + SPR explicit contract |
+| `epr enter` with any source | board appears frozen; no response on CDC **and** USART1 trace | PE/PRL/TX path wedged, OR console path wedged |
+| LED after freeze | ~250 ms continuous blink (`APP_LED_PD_WAIT`) | **main loop still runs**; PE believes CC attached but **no explicit contract** (stuck pre-contract / negotiation) |
+| `***FAULT` live line | never observed | no proof yet of vector-table HardFault |
+| `PREVIOUS RUN FAULTED` on reboot | not observed by user | no BKPSRAM fault record yet |
+| Debugger | available but user prefers not to use it | rely on serial experiments |
 
-1. **Layout collision.** The fault record sat at BKPSRAM offset 0
-   (`0x38800000`), on top of `APP_STORE_Cfg_t` (`app_store.c`). A
-   `store save` erased a crash record; a crash destroyed the saved
-   profile. Nobody could observe either.
-2. **Cache.** The whole BKPSRAM bank falls inside MPU region 0
-   subregion 1 (`0x20000000..0x3FFFFFFF`), which the 4 GB background
-   region **disables**. A disabled subregion is *not protected*: it
-   falls through to the Cortex-M7 **default** memory map — Normal,
-   write-back, **cacheable**. With D-cache enabled, the fault-record
-   stores stayed dirty in cache and were lost on warm reset. That is
-   why the report never appeared.
-3. **No PC captured, and the entry clobbered the frame.** The old
-   handler stored only CFSR/HFSR/MMFAR/BFAR. The C function entry ran
-   before anything read the hardware exception frame, so the stacked
-   PC/LR were unrecoverable even with a debugger attached at the
-   handler.
+The 250 ms `APP_LED_PD_WAIT` blink is decisive in one direction: it is
+programmed only in `APP_PD_OnCable(ATTACHED)` and on hard-reset notification
+(see `app_pd.c`), and `APP_LED_Task()` runs only from the **main loop**. So the
+main loop **keeps executing** after `epr enter`. A vector HardFault would jump
+to the blink loop with `__disable_irq()` and a completely different LED
+pattern (2 pulses + pause for HardFault code 2). A UCPD-ISR DMA hang would
+freeze the LED solid. Neither is observed.
 
-### 2. Fix delivered (`790fbd2`, 3 files)
+Yet the console does not answer. That combination points to one of:
 
-- **`main.c`**
-  - Fault record moved to `0x38800200` (clear of the store config at
-    `0x38800000`, which spans about 156 bytes) with magic
-    `0xFA017EDD`, plus PC/LR/xPSR slots.
-  - Fault vectors (`HardFault_Handler`, `MemManage_Handler`,
-    `BusFault_Handler`, `UsageFault_Handler`) are now **naked
-    trampolines**: they read SP from EXC_RETURN bit 2 *before* any C
-    prologue and tail-branch into `APP_FaultReportCore(frame, code)`,
-    so the 8-word hardware exception frame (R0..R3,R12,LR,PC,xPSR) is
-    captured intact. PC = frame[6], LR = frame[5].
-  - `APP_FaultReportCore` stores the record, prints it live on
-    **USART1** (the PD trace UART, PB6/PB7 @ 921600) via a bounded,
-    register-level, interrupt-free poll — so the PC survives even a
-    power cycle that clears backup SRAM — then blinks as before.
-  - New **MPU region 5**: `0x38800000`, 4 KiB, non-cacheable, so the
-    bank is no longer on the default write-back map.
-  - `APP_FaultReportBoot` prints the faulting PC/LR/xPSR, decodes
-    MMFAR/BFAR/HFSR validity bits, and prints the exact decode
-    command: `arm-none-eabi-addr2line -e
-    Appli/Release/Appli_Release.elf -f -C <PC>`.
-- **`stm32h7rsxx_it.c`** — stock C bodies #define-renamed away so a
-  CubeMX regeneration cannot reintroduce duplicate vector symbols.
-- **`main.h`** — prototypes updated.
+1. **The main loop is spending nearly all its time inside
+   `USBPD_DPM_Run()`** — i.e. `USBPD_PE_StateMachine_SNK()` (or the TX
+   transmission inside it) hangs, or loops, or takes an extremely long time.
+   The CLI poll / CDC flush / LED update would still run **sometimes**,
+   producing a ~250 ms-looking blink, but a human typing a command in the few
+   percent of available time never gets a response. EPR_Mode(Enter) is an
+   **extended (chunked) message**, transmitted from the PE task context
+   through the UCPD TX DMA with `while (CCR & EN)` spin-waits in
+   `usbpd_phy_hw_if.c` `USBPD_HW_IF_SendBuffer()` and in the UCPD ISR
+   (`usbpd_hw_if_it.c`). A stuck DMA channel / lost TX-complete / repeated
+   chunked-message retry loop would produce exactly this symptom and **no**
+   `***FAULT` line.
+2. **The USB CDC host side stopped polling** (host/terminal wedged, or a
+   missed IN-transfer with the 250 ms watchdog constantly resetting) while the
+   board itself is alive and running normally. `APP_LOG_Flush` has a 250 ms
+   IN-transfer watchdog and non-blocking ring, but if the host closes its
+   terminal without a USB detach, the board can look dead while actually
+   running.
+3. A vector HardFault *inside* an IRQ that also re-enables/keeps running (not
+   consistent with the LED evidence, since our fault handlers blink a distinct
+   code and spin forever).
 
-Host gate: 149/149.  Edited files pass `gcc -Wall -Wextra` against the
-real repo headers under the project's exact define set. No ARM build or
-flash was possible in this sandbox.
+The three mechanisms are cleanly separated by the **serial-isolation
+experiment** below.
 
-### 3. Static root-cause hunt — everything still open
+## Facts established
 
-Remaining runtime-only discriminator: the faulting PC/CFSR on the next
-`epr enter`. Statically cleared this session (each is evidence-backed,
-details in the code comments):
+- `epr enter` executes in the **main loop** (CDC CLI poll), not in an ISR.
+- The app path (`app_cmd.c` → `APP_EPR_Cmd` → `APP_EPR_ModeEnter` →
+  `USBPD_PE_Request_EPRModeEnter`) is clean: no waits, no IRQ games, bounded
+  state. `APP_EPR_Ctx`, `APP_PD_Port`, the log ring (8 kB, non-blocking with a
+  250 ms TX watchdog), and the CDC RX ring are all bounded and watchdogged.
+- The PE (no-OS integration): `USBPD_DPM_Run()` runs one cooperative slice per
+  main-loop pass — CAD, then per-port `USBPD_PE_StateMachine_SNK()`, then
+  `USBPD_DPM_UserExecute()`. `USBPD_PE_TaskWakeUp` only clears
+  `DPM_Sleep_time[port]` in no-OS builds (benign).
+- Library decode (IAR objects from `USBPDCORE_PD3_FULL_CM7_wc32.a`, via
+  `/home/user/scratch/venv`, capstone Thumb):
+  - `USBPD_PE_Request_EPRModeEnter` gates on PE status/state; on acceptance it
+    writes PE state byte `0xa8` (SEND_EPR_MODE), stores `1`, wakes the PE task,
+    returns 0.
+  - PE EPR AMS tables live in `usbpd_pe_epr.o`; the SNK entry table rows
+    (13-byte rows with state codes 0xa8/0xa9/…) reference handlers
+    `EPRMode_Enter`, `EPRMode_EnterAnswer`, etc. — all present. Static bounds
+    so far look sound.
+- UCPD TX is DMA-driven (GPDMA1 CH1), with **spin-waits on
+  `hdmatx->CCR & EN`** in `USBPD_HW_IF_SendBuffer()` (PE-task context) and in
+  the UCPD ISR for TXMSGDISC/TXMSGSENT/TXMSGABT. If a channel ever stays EN
+  after `SUSP|RESET`, that code spins forever.
+- UCPD ISR / main-loop liveliness: heartbeat LED (1 s) and PD_WAIT LED
+  (250 ms) only run from the main loop; the UCPD ISR would freeze them solid.
+- Fault-capture build: `***FAULT code=N CFSR=… HFSR=… PC=… LR=…` on USART1
+  (PB6/PB7 @ 921600) at the fault, plus a BKPSRAM record
+  (`0x38800200`) printed as `*** PREVIOUS RUN FAULTED` on the next boot.
 
-- **PE context overrun**: the per-port PE handle is `malloc(0x4A0)`
-  (1184 bytes, `USBPD_PE_Init` +0x2A, NULL-checked); the deepest
-  context write found anywhere is `PE_SubStateMachine_VconnSwap`
-  `strb +0x49E` — fits exactly. The library cannot overrun its own
-  handle.
-- **Callback-table NULLs**: all 17 `USBPD_PE_Callbacks` slots are
-  installed and bounded (verified map in the repo notes); VCONN
-  returns are spec-legal.
-- **DPM scratch overrun / DataId mismatch**: measured DataId enum
-  values by compiling against the real headers under the exact
-  `.cproject` defines: `SNK_PDO_EPR`=25, `SNK_PDP_EPR`=30,
-  `RCV_*_EPR`=26/27, etc.  `USBPD_DPM_GetDataInfo` writes exactly
-  bounded values.
-- **App-side EPR parsing**: `APP_EPR_OnSrcPdo` bounds AVS to
-  `src_avs[7]`; `APP_EPR_GetSinkEprPdos` bounds to
-  `USBPD_MAX_NB_EPRPDO`; `OnModeDo` requires 4 bytes. No overflow.
-- **Same ST lib runs the reference flow** on other STM32s (G071
-  thread trace), so the library's EPR path is not inherently fatal.
+## Decisive next experiment (takes ~2 minutes)
 
-So the crash is still pinned to something that only a fault PC (now
-guaranteed to be captured) can localize. **Do not flash and call EPR
-done**: flash the `790fbd2` build, reproduce `epr enter`, and read the
-record.
+Two tests, done on the newest fault-capture build with a real source attached
+and a normal contract established (LED solid = PD_CONTRACT):
 
-## Next steps (in order)
+### A. Is the console path wedged, or the whole system?
+After `epr enter` appears to freeze the CDC console:
 
-1. Rebuild in CubeIDE (GNU ARM 14.3.1) and flash.
-2. Reproduce: EPR charger → `epr enter` → board faults.
-3. Read the record — **two independent channels**:
-   - On the trace UART (USART1 PB6/PB7 @ 921600, any terminal): the
-     `***FAULT code=2 CFSR=… PC=… LR=…` line prints live at the
-     moment of the fault, before the blink loop.
-   - Next USB CDC boot banner: `*** PREVIOUS RUN FAULTED: HardFault
-     … PC=0x9000xxxx` plus the decode command.
-4. Decode the PC: `arm-none-eabi-addr2line -e
-   Appli/Release/Appli_Release.elf -f -C 0x9000xxxx` (or the Debug
-   ELF).  Re-derive the call target at that site from the library's
-   relocations (pyelftools ground truth — do NOT trust the old
-   `RELOC[n]` dump labels or unlinked capstone `bl` targets).
-5. Only then write the evidence-backed fix, and only claim EPR
-   HARDWARE VERIFIED with an `Enter Succeeded` log plus a board that
-   stays alive.
+1. **Close the serial terminal completely** (disconnect the CDC COM port /
+   close PuTTY/Tera Term) and **wait 2 seconds**.
+2. Reopen the terminal (or reconnect). If you now get a **fresh banner +
+   prompt** (or a backlog of lines), the board was alive the whole time and
+   the freeze was a **host/CDC TX wedge** — the PD stack may be perfectly
+   fine. That changes the fix completely (console path, not PE).
+3. If the reopened terminal is **still dead**, the board really is stuck →
+   proceed to B.
+
+### B. Does the PE task ever return?
+While the console appears dead, type `epr enter` again, then **press the
+board reset button** and watch the USART1 trace terminal (not CDC): if the
+`*** PREVIOUS RUN FAULTED` banner appears, the freeze was a vector fault and
+the record now contains the exact PC. If no banner appears, the CPU is
+spinning somewhere with interrupts disabled or in a non-faulting loop.
+
+### C. USART1 trace observation
+The `***FAULT` live print, when it happens, goes to **USART1 PB6/PB7 @ 921600**
+(the PD trace UART) — NOT the CDC console. If the terminal software can run
+both, keep USART1 open and watch it during the freeze.
+
+## History of what was tried / refuted
+
+- ~~EPR-charger-only / source VCONN swap / cable discovery~~ — **refuted**:
+  reproduces on plain SPR sources.
+- ~~Plain vector HardFault kills everything (LED solid / 2-pulse blink)~~ —
+  inconsistent with the observed 250 ms blink continuing.
+- ~~DMA stop-spin in the UCPD ISR~~ — would freeze the LED solid; not
+  consistent unless the blink observation was of a different pattern.
+
+## What to fix (depends on experiment A/B)
+
+- If A shows a **host/CDC TX wedge**: fix the console path (the 250 ms
+  watchdog / IN-transfer latching) — the PE never crashed.
+- If B shows **no fault record but the system is stuck**: instrument
+  `USBPD_DPM_Run()`/`USBPD_PE_StateMachine_SNK()` with a per-call entry/exit
+  cycle marker on USART1 (bounded, register-level) to find whether the PE
+  call ever returns; if it does not, the next step is to isolate
+  `USBPD_HW_IF_SendBuffer()` and the UCPD TX DMA state at that moment.
+- If a fault record appears: use the captured PC + `addr2line` against the
+  Appli ELF.
+
+## Build / flash / test reminders
+
+- Branch: `arena/01a06344-usb-ucpd-new` (this branch).
+- Build the Appli in CubeIDE (GNU ARM 14.3.1); the trace UART is USART1
+  PB6/PB7 @ 921600. CDC console is the USB HS CDC.
+- Host gate: `python3 tools/hosttest/run.py` → 149/149. Edited files must stay
+  `-Wall -Wextra` clean. No HARDWARE VERIFIED without `Enter Succeeded` **and**
+  the board still alive afterward.
