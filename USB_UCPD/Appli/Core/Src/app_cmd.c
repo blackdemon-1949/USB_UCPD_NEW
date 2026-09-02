@@ -135,9 +135,11 @@ static const APP_CMD_t s_cmds[] =
     "EPR: capability, AVS PDOs, mode state, ceiling",
     APP_EPR_Cmd },
 
-  { "power", "power [status|clear]",
+#if APP_ENG_ANALYTICS
+    { "power", "power [status|clear]",
     "V/I/P statistics and session energy from the INA226",
     cmd_power },
+#endif
 
   { "cable", "cable [status|vdo <hex>|discover]",
     "live cable E-marker identity, VDO decode, compatibility verdict",
@@ -147,9 +149,11 @@ static const APP_CMD_t s_cmds[] =
     "PPS windows, operating-point validation, RDO construction",
     APP_PPS_Cmd },
 
-  { "temp", "temp [status|clear]",
+#if APP_ENG_ANALYTICS
+    { "temp", "temp [status|clear]",
     "DTS temperature: current, min, max, average",
     APP_TEMP_Cmd },
+#endif
 
   { "integ", "integ [status|crc [text]|sha256 [text]|session|rng]",
     "hardware CRC, SHA-256 fingerprints and RNG",
@@ -167,9 +171,11 @@ static const APP_CMD_t s_cmds[] =
     APP_STORE_Cmd },
 #endif
 
-  { "ext", "ext",
+#if APP_ENG_EXT
+    { "ext", "ext",
     "chunked extended-message reassembly state and errors",
     APP_EXT_Cmd },
+#endif
 
 #if APP_ENG_FUZZ
   { "fuzz", "fuzz [run [n] [seed]|random [n]]",

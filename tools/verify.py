@@ -15,7 +15,9 @@ import re
 import struct
 import sys
 
-ROOT = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+# argv[1] may be the repo root, but flags like --core must not be swallowed
+_pos = [x for x in sys.argv[1:] if not x.startswith('-')]
+ROOT = _pos[0] if _pos else os.getcwd()
 
 AXI_SRAM_BASE = 0x24000000
 AXI_SRAM_BUDGET = 0x72000          # 456 KiB - CubeMX AXI SRAM budget for H7R3
@@ -331,17 +333,58 @@ def check(proj, config, wanted):
     return True
 
 
+# Symbols that belong to engines the CORE PD bench profile compiles out.  In a
+# CORE build these must be ABSENT - their absence is the proof that no dead
+# optional engine code or CLI surface was left behind.
+CORE_DISABLED_PREFIXES = (
+    'APP_CAP_', 'APP_PDCAP_', 'APP_TXN_', 'APP_PWR_', 'APP_TEMP_',
+    'APP_TEST_', 'APP_STORE_', 'APP_EXT_', 'APP_FUZZ_', 'APP_CMD_Poll',
+    'APP_DEC_', 'APP_RNG_',
+)
+
+
+def core_symbol_set():
+    """APPLI_SYMBOLS minus everything the CORE profile compiles out."""
+    return [s for s in APPLI_SYMBOLS
+            if not s.startswith(CORE_DISABLED_PREFIXES)]
+
+
 def main():
     global USB_DMA_BUFS, ALL_STATICS
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--core', action='store_true',
+                    help='verify a CORE PD bench build: optional engines must '
+                         'be absent, retained features must be present')
+    a = ap.parse_args()
+
+    appli_syms = core_symbol_set() if a.core else APPLI_SYMBOLS
     ALL_STATICS = ('MPU_Config',)
     good = True
     for proj, syms, bufs, statics in (
             ('Boot', BOOT_SYMBOLS, (), ('MPU_Config',)),
-            ('Appli', APPLI_SYMBOLS, ('UserRxBufferHS', 'UserTxBufferHS'),
+            ('Appli', appli_syms, ('UserRxBufferHS', 'UserTxBufferHS'),
              ('MPU_Config', 'APP_PD_AutoApply'))):
         USB_DMA_BUFS, ALL_STATICS = bufs, statics
         for cfg in ('Debug', 'Release'):
             good &= check(proj, cfg, syms)
+
+    if a.core:
+        print('-' * 76)
+        print('CORE profile: optional engines must be ABSENT')
+        for cfg in ('Debug', 'Release'):
+            names = set(elf_symbols(os.path.join(
+                ROOT, 'USB_UCPD', 'Appli', cfg,
+                'Appli_%s.elf' % cfg)).keys())
+            leftovers = sorted(n for n in names
+                               if n.startswith(CORE_DISABLED_PREFIXES))
+            if leftovers:
+                good = False
+                print('  Appli/%s LEAKED (%d): %s'
+                      % (cfg, len(leftovers), ' '.join(leftovers[:10])))
+            else:
+                print('  Appli/%s clean: no capture/txn/ext/fuzz/test/store/'
+                      'analytics symbols linked' % cfg)
     print('=' * 76)
     print('OVERALL: %s' % ('PASS' if good else 'FAIL'))
     return 0 if good else 1

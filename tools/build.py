@@ -216,10 +216,34 @@ def main():
     ap.add_argument('--extra-defines', nargs='*', default=[],
                     metavar='NAME=VAL',
                     help='extra -D flags, e.g. APP_ENG_CAPTURE=0 to bisect')
+    ap.add_argument('--core', action='store_true',
+                    help='CORE PD bench profile: PD/PPS/AVS/EPR/VDM/cable/'
+                         'INA226/diagnostics/CLI only; capture, transaction, '
+                         'extended, analytics, persistence, fuzz and test '
+                         'engines compiled out')
     a = ap.parse_args()
     global ROOT, EXTRA_DEFINES
     ROOT = os.path.abspath(a.root)
-    EXTRA_DEFINES = list(a.extra_defines)
+    CORE_PROFILE = {
+        # compiled out for the CORE PD bench firmware
+        'APP_ENG_CAPTURE': '0',    # no RAM ring; ST trace hook untouched
+        'APP_ENG_TXN': '0',        # no transaction reconstruction
+        'APP_ENG_EXT': '0',        # no chunked extended reassembly
+        'APP_ENG_ANALYTICS': '0',  # no periodic power/temperature polling
+        'APP_ENG_STORE': '0',      # no persistence
+        'APP_ENG_FUZZ': '0',       # no malformed-message engine
+        'APP_ENG_TEST': '0',       # no replay/test-vector engine
+        # retained: these ARE the CORE feature set
+        'APP_ENG_EPR': '1',
+        'APP_ENG_VDM': '1',
+        'APP_ENG_CABLE_VDM': '1',
+        'APP_ENG_DIAG': '1',
+    }
+    if a.core:
+        EXTRA_DEFINES = ['%s=%s' % kv for kv in sorted(CORE_PROFILE.items())]
+        EXTRA_DEFINES += list(a.extra_defines)
+    else:
+        EXTRA_DEFINES = list(a.extra_defines)
     projs = ['Boot', 'Appli'] if a.project == 'all' else [a.project]
     cfgs = ['Debug', 'Release'] if a.config == 'all' else [a.config]
     rc = 0
