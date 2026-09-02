@@ -121,3 +121,87 @@ On the CC capture you should now see `EPR_Get_Source_Cap`,
 Succeeded)` — none of which the previous firmware could emit. If `epr caps`
 still reports `-> queued to PE` but no CC traffic appears, the next suspect is
 the AMS/interruptible-state check in `PE_SNK_READY`, not the settings flag.
+
+
+---
+
+# H. First hardware run — results and four further fixes
+
+## What the bench proved (the primary fix works)
+
+`epr diag` with the EPR source attached, `DPM_Params = 0x08043BA2`:
+
+```
+PE connected        : yes          Is_EPR_Supported_SNK: 1 (enabled)
+power role          : SNK          EPR_Get_Source_Cap : all gates PASS
+contract            : EXPLICIT     EPR_Mode(Enter)    : all gates PASS
+src 5V PDO EPR bit  : SET (source is EPR capable)
+```
+
+Both root causes from the audit are confirmed fixed:
+
+* the gate that silently discarded every EPR message is **open**;
+* SPR discovery now reports the source as EPR-capable, so the circular
+  dependency is **broken** and RDO B21 will be set.
+
+SPR regression clean: 6 PDOs listed, Request accepted, 5 V explicit contract,
+INA226 5.020 V. USB CDC, UCPD, XIP, I2C2 all fine.
+
+## Why EPR still did not complete — and it was not a gate
+
+`EPR_Mode(Enter)` returned `USBPD_OK` and the source never replied.
+Disassembling `EPRMode_Enter` explains it exactly:
+
+```
+blx  GetDataInfo        ; DataId 0x1E = RCV_REQ_COPYPDO
+ldr  r0,[sp]
+bfi  r5,r0,#0x10,#8     ; EPRMDO.Data   <- must be Sink Operational PDP
+bfi  r5,#1, #0x18,#8    ; EPRMDO.Action <- 1 (Enter)
+```
+
+`USBPD_DPM_GetDataInfo` had **no case for 0x1E**, so it fell to
+`default: *Size = 0` and the Data byte was never written. The board was
+transmitting a malformed `EPR_Mode(Enter)`. PD3.1 Fig 6-32 requires that field
+to be the EPR Sink Operational PDP. **Fixed.**
+
+## A defect in my own instrumentation
+
+The probe printed `PD TX 0 / PD RX 0 / GoodCRC 0` while PD was demonstrably
+working. Those counters are incremented **only** inside `APP_PDCAP_Trace()`,
+which lives behind `APP_ENG_CAPTURE`; this build is `cap=0`, so no funnel was
+installed and the counters were structurally dead. My previous report treated
+them as evidence — that was wrong. A minimal counter funnel is now installed
+whenever the capture engine is absent.
+
+## Fake success in the CLI
+
+`USBPD_OK == 0`, so untouched fields rendered as successes:
+`last GetSrcCap st : USBPD_OK` for a call never made, and
+`last action: RESERVED`. Both now say **not attempted** / **none**.
+`USBPD_CORE_DATATYPE_EPRMODE` is now handled, so an *Enter Failed* and its
+reason code (e.g. `0x01 cable not EPR capable`) are reported instead of
+dropped.
+
+## Overstated capability
+
+`sink PDP : 140 W` assumed 5 A unconditionally — through a 3 A cable to a
+100 W source. Now derived from the live e-marker rating (3 A default, 5 A only
+when Discover Identity confirms it): 28 V x 3 A = **84 W**.
+
+## Cosmetic issues from your log
+
+* INA226 `cfg reads 0x4907 (want 0x2907)` — bits 15..12 are reset/reserved and
+  read back device-specifically. Only the operating bits (0x0FFF) are compared
+  now; they matched all along.
+* INA226 printed an identical idle line every second, burying PD output. Now
+  prints on >=50 mV / >=20 mA change or a 15 s heartbeat.
+
+## Status
+
+| Feature | Researched | Implemented | Compiled | Flashed | HW verified |
+|---|---|---|---|---|---|
+| EPR gate open | YES | YES | host | YES | **YES** |
+| EPR SPR discovery | YES | YES | host | YES | **YES** (bit SET) |
+| EPR_Mode(Enter) well-formed | YES | YES | host | not yet | **NO** |
+| EPR contract / KeepAlive / exit | YES | partial | host | not yet | **NO** |
+| SPR / PPS / INA226 / CDC | — | unchanged | host | YES | **YES** |
