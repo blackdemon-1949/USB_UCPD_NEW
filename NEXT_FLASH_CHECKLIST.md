@@ -1,105 +1,94 @@
-# The brick is found and fixed — plus the ST library was out of date
+# EPR crash: found, and the board can no longer brick itself
 
-## Why the board locked up after `EPR_Mode(Enter)`
+## The LED flicker told us what it was
 
-It was **not** bricked hardware and **not** the charger. It was a hard fault
-caused by re-entering the policy engine from inside its own callback.
+That fast PB2 blink **is** `Appli_Fail()` — the fault handler I added last
+round. So the board is not hanging or losing power: it takes a **CPU fault**
+and parks in the blink loop. That narrowed everything.
 
-`APP_EPR_OnSrcPdo()` called `APP_EPR_ModeEnter()` directly. That function runs
-inside `USBPD_DPM_SetDataInfo` — i.e. on the PE's own call stack while it is
-mid-message. Calling `USBPD_PE_Request_EPRModeEnter()` there re-enters the
-state machine already executing and corrupts its AMS bookkeeping.
+## Defect 1 — I used the wrong DataId
 
-Every fault handler in this project was a bare `while(1)`, so the fault looked
-exactly like your symptom: console dead, no reaction to unplugging the source,
-physical reset button required.
+`EPRMode_Enter` does `movs r1,#0x1e`. Last round I mapped that to
+`RCV_REQ_COPYPDO` by hand-counting the enum, and **the count was wrong** — it
+skipped the `#if`-guarded members. Compiling the real v5.4.1 enum gives:
 
-**Fixed:** entry now sets a flag and `APP_PD_Task()` performs it in task
-context. This was my bug, introduced when I added auto-entry.
-
-## Your hardware *does* support EPR — and the stack was stale
-
-You were right to push on this. Your EPR charger set the EPR bit and the board
-got all the way to `EPR_Mode(Enter) ... ACCEPTED by PE`, which is exactly the
-point the fault hit.
-
-I also found the shipped ST core library is an **older build**:
-
-| | size | md5 |
-|---|---|---|
-| was | 341 634 | `2fb9c3f7…` |
-| now | 344 742 | `82418ccd…` |
-
-Upgraded to **official ST v5.4.1** (`stm32-mw-usbpd-core`, commit `aafa359`).
-Its release notes list precisely the EPR defects we hit:
-
-* *"EPR Mode Entry message sent by SNK, should contain EPR SNK Operational PDP
-  value in Data field"* — the exact `DataId 0x1E` bug I found by disassembly
-* *"EPR SRC state machine should check conditions on PDO and RDO are fulfilled
-  prior answering Enter Acknowledged"*
-* *"Correct Size value when storing received EPR PDOs"*
-* *"Update management of SRC_CAP message by SNK when in EPR mode"*
-* *"Trig Hard Reset when SPR SRC Capabilities is received while in EPR mode"*
-
-**Verified safe before swapping:** identical exported symbols, EPR gates at the
-same context offsets (so the boundary probe stays valid), and the two changed
-headers only add types — the renamed `GiveBackFlag`/`SourceInfoDO` are used
-**0 times** in this application. Compiles clean, 148/148 tests pass.
-
-## Also fixed
-
-| Item | Fix |
+| value | actual constant |
 |---|---|
-| Silent lock-ups | Fault handlers latch CFSR/HFSR/MMFAR/BFAR and blink a code (2=Hard, 3=MemManage, 4=Bus, 5=Usage) instead of dying quietly |
-| Stack headroom | 4 KB → 8 KB in the **active** script only. EPR is the deepest call chain here and `APP_LOG_Printf` adds 256 B/frame. DTCM is 64 KB and holds only the stack. MPU/RAM layout, heap placement and ASSERTs untouched |
-| `temp` missing | DTS decoupled from `APP_ENG_ANALYTICS` |
+| **0x1E** | `SNK_PDP_EPR` ← what Enter really asks for |
+| 0x1C | `RCV_REQ_COPYPDO` |
+| 0x17 | `EPRMODE` |
+| 0x19 | `SNK_PDO_EPR` |
 
-## Build and flash
+The bogus case is removed and every size is now justified against the
+disassembly that establishes it.
 
-```bash
-python3 tools/build.py --project all --config all --jobs 8
-python3 tools/verify.py
+## Defect 2 — the EPR sink list was unbounded
+
+`Send_EPR_SnkCapa` does `memclr(ctx+0x14, 0x104)`, writes the SPR PDOs at
+`ctx+0x14`, then asks the DPM for `SNK_PDO_EPR` at `ctx+0x30` — exactly slot 8,
+as PD3.1 requires. Our handler answered with **one** 4-byte AVS object and no
+bound at all.
+
+Replaced with `APP_EPR_GetSinkEprPdos()`: a correctly shaped EPR sink list
+(28/36/48 V Fixed below your ceiling, then one AVS APDO), hard-bounded by
+`USBPD_MAX_NB_EPRPDO` so it can never overrun the library's buffer. Current
+comes from the e-marker, so it never claims 5 A on a 3 A cable.
+
+## The board can no longer brick itself
+
+**Automatic EPR entry is now OFF by default.** That is the important change.
+Previously it armed itself the instant an EPR source attached — so when entry
+faulted, the board rebooted, auto-entered, and faulted again. An
+unrecoverable loop needing the reset button. A feature that can brick the
+instrument must not arm itself.
+
+* `epr` / `epr diag` — detection and reporting, always automatic
+* `epr enter` — **one** manual attempt
+* `epr on` — arm automatic entry (only after a manual attempt succeeds)
+
+I also split `enable` (auto-enter) from `allow` (advertise EPR capability).
+Gating the RDO bit on `enable` would have made a manual entry fail with the
+source's own reason `0x03, EPR Mode Capable bit not set in the RDO`.
+
+## Crash forensics — no more guessing
+
+Fault handlers now stash the fault code plus **CFSR / HFSR / MMFAR / BFAR** in
+BKPSRAM, which survives a warm reset, and the next boot prints:
+
+```
+*** PREVIOUS RUN FAULTED: HardFault (code 2)
+    CFSR=0x........ HFSR=0x........ MMFAR=0x........ BFAR=0x........
 ```
 
-**Do a clean rebuild** — the middleware headers changed.
+That decodes to the exact fault type and faulting address.
 
-## What to check
+## Test sequence — please follow this order
 
-With the **SPR-only** charger (regression):
-```
-req 2 / volt 20000 / pps 21000     # must still work
-temp                                # must report a temperature now
-diag all                            # cdc_tx_stalls, log_dropped = 0
-```
+Clean rebuild (middleware headers changed), flash, then:
 
-With the **EPR** charger — this is the real test:
-```
-epr diag        # gates
-epr             # 'src 5V PDO EPR bit' should be SET
-```
-Then just wait. Auto-entry fires ~300 ms after the explicit contract. Expected:
+**1. SPR charger — regression.** `req 2`, `pps 21000`, `temp`, `diag all`.
+Everything that worked must still work. Nothing auto-enters now.
 
-```
-EPR_Mode: source replied Enter Acknowledged
-EPR_Mode: source replied Enter Succeeded - EPR mode active
-```
+**2. EPR charger — attach and WAIT.** The board must stay fully responsive
+and must **not** enter EPR on its own. Run `epr` and `epr diag`.
 
-**The board must stay responsive either way.** If a fault does occur you'll now
-see the LED blink a code instead of silence — tell me the count.
+**3. Only then:** `epr enter`
+
+If it still faults, the board will come back and print the fault registers on
+the next boot. **Send me that line** — it identifies the faulting instruction
+directly.
 
 ## Honest status
 
-| Feature | Implemented | HW verified |
-|---|---|---|
-| SPR 5/9/12/15/20 V | YES | **YES** |
-| PPS / AVS (to 21 V) | YES | **YES** |
-| INA226, real VBUS | YES | **YES** |
-| Diagnostics counters | YES | **YES** |
-| CDC stability | YES | partly (Code 10 gone) |
-| DTS temp | YES | not yet |
-| **EPR entry** | YES — brick fixed, lib upgraded | **NOT YET** |
+| Feature | HW verified |
+|---|---|
+| SPR 5/9/12/15/20 V, PPS to 21 V | **YES** |
+| INA226, real VBUS, diagnostics | **YES** |
+| CDC stability (Code 10 gone) | **YES** |
+| No-brick guarantee with EPR source | expected — not yet proven |
+| EPR mode entry | **NOT YET** |
 
-I cannot ARM-link or flash here, so I will not claim EPR works until your
-capture shows `Enter Succeeded`. What I can say: the crash mechanism is
-identified and removed, and the stack is now the current ST release with the
-EPR fixes in it.
+I cannot ARM-link or flash here. What I will commit to: the fault is now
+**self-reporting**, and with auto-entry disarmed an EPR charger should no
+longer be able to lock the bench. 149/149 host tests, 0 compile errors,
+ST core library at official v5.4.1.
