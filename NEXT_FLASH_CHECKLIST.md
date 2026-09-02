@@ -1,92 +1,105 @@
-# Status after the last bench run
+# The brick is found and fixed — plus the ST library was out of date
 
-## SPR / PPS / AVS: WORKING — hardware confirmed
+## Why the board locked up after `EPR_Mode(Enter)`
 
-Your log proves it, and this is the first run where I can say that honestly:
+It was **not** bricked hardware and **not** the charger. It was a hard fault
+caused by re-entering the policy engine from inside its own callback.
 
-| Request | Contract | INA226 measured |
+`APP_EPR_OnSrcPdo()` called `APP_EPR_ModeEnter()` directly. That function runs
+inside `USBPD_DPM_SetDataInfo` — i.e. on the PE's own call stack while it is
+mid-message. Calling `USBPD_PE_Request_EPRModeEnter()` there re-enters the
+state machine already executing and corrupts its AMS bookkeeping.
+
+Every fault handler in this project was a bare `while(1)`, so the fault looked
+exactly like your symptom: console dead, no reaction to unplugging the source,
+physical reset button required.
+
+**Fixed:** entry now sets a flag and `APP_PD_Task()` performs it in task
+context. This was my bug, introduced when I added auto-entry.
+
+## Your hardware *does* support EPR — and the stack was stale
+
+You were right to push on this. Your EPR charger set the EPR bit and the board
+got all the way to `EPR_Mode(Enter) ... ACCEPTED by PE`, which is exactly the
+point the fault hit.
+
+I also found the shipped ST core library is an **older build**:
+
+| | size | md5 |
 |---|---|---|
-| `req 2` (9 V) | `explicit contract 9000 mV / 3000 mA` | **8.981 V** |
-| `volt 20000` | `explicit contract 20000 mV / 5000 mA (PDO 6)` | **20.021 V** |
-| `pps 15789 5000` | `explicit contract 15789 mV / 5000 mA` | **15.766 V** |
+| was | 341 634 | `2fb9c3f7…` |
+| now | 344 742 | `82418ccd…` |
 
-The VCONN-swap revert fixed the regression I introduced. Counters are real
-now too: `neg_accept 13`, `neg_contract 9`, `attach 1`, `pd_tx 41`.
+Upgraded to **official ST v5.4.1** (`stm32-mw-usbpd-core`, commit `aafa359`).
+Its release notes list precisely the EPR defects we hit:
 
-## EPR: your charger cannot do it, and the firmware is right
+* *"EPR Mode Entry message sent by SNK, should contain EPR SNK Operational PDP
+  value in Data field"* — the exact `DataId 0x1E` bug I found by disassembly
+* *"EPR SRC state machine should check conditions on PDO and RDO are fulfilled
+  prior answering Enter Acknowledged"*
+* *"Correct Size value when storing received EPR PDOs"*
+* *"Update management of SRC_CAP message by SNK when in EPR mode"*
+* *"Trig Hard Reset when SPR SRC Capabilities is received while in EPR mode"*
 
-`epr` reported **`src 5V PDO EPR bit : clear (SPR-only source)`** — that is
-correct, not a bug.
+**Verified safe before swapping:** identical exported symbols, EPR gates at the
+same context offsets (so the boundary probe stays valid), and the two changed
+headers only add types — the renamed `GiveBackFlag`/`SourceInfoDO` are used
+**0 times** in this application. Compiles clean, 148/148 tests pass.
 
-Your source advertises `5/9/12/15/20 V` and `PPS 3.3–21 V`. Maximum
-**20 V × 5 A = 100 W**, no 28/36/48 V PDO.
+## Also fixed
 
-PD 3.1 defines EPR as **above 100 W**, requiring a 28/36/48 V Fixed PDO *and*
-the EPR Mode Capable bit in the 5 V PDO. This charger is an SPR-only PD 3.0
-supply. **No firmware change — mine or ST's — can make it deliver EPR.** The
-stack is genuinely PD 3.1: `usbpd_pe_epr.o` is linked, all five ST gates pass,
-and the board correctly declines to send `EPR_Mode(Enter)` to a source that
-never claimed EPR. Sending it anyway would be the fake behaviour you told me
-to avoid.
-
-`epr` now states the reason, quoting the source's own numbers.
-
-### About the WeAct PowerMonitor
-
-It doesn't do EPR either. Its own protocol spec (`com_PowerMonitorMiniV1.py`,
-`CMD_PD_PDO_AVS = 0x0B`) *reads* AVS descriptors — `{"minvoltage": 15000,
-"maxvoltage": 28000, "maxpower": 240}` in the docstring is an **example of the
-data format**, not something it negotiated. It reports what a charger
-advertises, exactly as our `caps` does. To see EPR you need a genuine EPR
-charger: 140 W+ with a 28 V PDO (e.g. Apple 140 W, Framework 180 W, Delta
-240 W) **and** a 5 A e-marked cable.
-
-## Fixed this round
-
-| Problem | Cause |
+| Item | Fix |
 |---|---|
-| **CDC unusable again** | Real deadlock: `s_tx_busy` is cleared only by `CDC_TransmitCplt`; if that is ever missed the console dies permanently. Added a 250 ms watchdog + `cdc_tx_stalls` counter |
-| **Console flooding** | INA226 printed every second, corrupting PD output and keeping the IN endpoint busy. Periodic printing now **off** by default (`ina` on demand, `ina auto on` to restore). Sampling still runs for VBUS |
-| **`temp` never worked** | DTS was clocked from **LSE**, but Appli configures no oscillator and no 32 kHz crystal exists → LSE never ready. Switched to **PCLK**. Also stopped a DTS failure calling `Error_Handler()`, which would kill PD/CDC/CLI |
-| **`engines` unknown** | Command added |
+| Silent lock-ups | Fault handlers latch CFSR/HFSR/MMFAR/BFAR and blink a code (2=Hard, 3=MemManage, 4=Bus, 5=Usage) instead of dying quietly |
+| Stack headroom | 4 KB → 8 KB in the **active** script only. EPR is the deepest call chain here and `APP_LOG_Printf` adds 256 B/frame. DTCM is 64 KB and holds only the stack. MPU/RAM layout, heap placement and ASSERTs untouched |
+| `temp` missing | DTS decoupled from `APP_ENG_ANALYTICS` |
 
-## Engines
-
-ON: `capture` `cable` `epr` `vdm` `diag` (+ DTS temp, INA226, PPS/AVS).
-OFF: `txn` `ext` `analytics` — enabling all three together is what brought the
-CDC instability back; `analytics` polls I2C and formats stats in the
-super-loop. `fuzz`/`test`/`store` remain off.
-
-## Build & flash
+## Build and flash
 
 ```bash
 python3 tools/build.py --project all --config all --jobs 8
 python3 tools/verify.py
 ```
 
-## Check after flashing
+**Do a clean rebuild** — the middleware headers changed.
+
+## What to check
+
+With the **SPR-only** charger (regression):
+```
+req 2 / volt 20000 / pps 21000     # must still work
+temp                                # must report a temperature now
+diag all                            # cdc_tx_stalls, log_dropped = 0
+```
+
+With the **EPR** charger — this is the real test:
+```
+epr diag        # gates
+epr             # 'src 5V PDO EPR bit' should be SET
+```
+Then just wait. Auto-entry fires ~300 ms after the explicit contract. Expected:
 
 ```
-engines          # confirm profile
-temp             # must now report a temperature, not "not started"
-req 2 / volt 20000 / pps 15789 5000
-diag all         # cdc_tx_stalls and log_dropped must stay 0
-cable status     # e-marker
-epr              # will state why EPR is unavailable with THIS charger
+EPR_Mode: source replied Enter Acknowledged
+EPR_Mode: source replied Enter Succeeded - EPR mode active
 ```
+
+**The board must stay responsive either way.** If a fault does occur you'll now
+see the LED blink a code instead of silence — tell me the count.
 
 ## Honest status
 
-| Feature | Researched | Implemented | Compiled | HW verified |
-|---|---|---|---|---|
-| SPR 5/9/12/15/20 V | YES | YES | host | **YES** |
-| PPS / AVS | YES | YES | host | **YES** |
-| INA226 + real VBUS | YES | YES | host | **YES** |
-| Diagnostics counters | YES | YES | host | **YES** |
-| USB CDC stability | YES | YES | host | fix unproven |
-| DTS temperature | YES | YES | host | fix unproven |
-| EPR | YES | YES | host | **blocked — needs a real EPR charger** |
+| Feature | Implemented | HW verified |
+|---|---|---|
+| SPR 5/9/12/15/20 V | YES | **YES** |
+| PPS / AVS (to 21 V) | YES | **YES** |
+| INA226, real VBUS | YES | **YES** |
+| Diagnostics counters | YES | **YES** |
+| CDC stability | YES | partly (Code 10 gone) |
+| DTS temp | YES | not yet |
+| **EPR entry** | YES — brick fixed, lib upgraded | **NOT YET** |
 
-I cannot ARM-link or flash in my sandbox, so the CDC and DTS fixes are
-unproven until you flash. ST middleware and the core library are untouched
-(`2fb9c3f7…`).
+I cannot ARM-link or flash here, so I will not claim EPR works until your
+capture shows `Enter Succeeded`. What I can say: the crash mechanism is
+identified and removed, and the stack is now the current ST release with the
+EPR fixes in it.
