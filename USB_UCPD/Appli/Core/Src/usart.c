@@ -209,7 +209,15 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
     }
 
     /* USART1 interrupt Init */
-    HAL_NVIC_SetPriority(USART1_IRQn, 0, 0);
+/* Lowest priority in the project's existing scheme.  The baseline scheme is
+       OTG_HS 4 > UCPD1 5 / GPDMA CH0-1 5 > GPDMA CH2-3 6.  Both UARTs are new
+       relative to the known-good baseline and were at 0, i.e. able to preempt
+       USB HS enumeration (4), UCPD1 (5) and every DMA channel - a plausible
+       cause of intermittent Windows Code 10.  7 keeps them below all of those
+       without reordering anything that already worked.  USART2 overrun loses
+       CLI keystrokes, which is benign; USART1 trace runs in DMA mode
+       (GPDMA CH3), so its IRQ is not on the byte path. */
+    HAL_NVIC_SetPriority(USART1_IRQn, 7, 0);
     HAL_NVIC_EnableIRQ(USART1_IRQn);
   /* USER CODE BEGIN USART1_MspInit 1 */
 
@@ -246,7 +254,15 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
     HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
     /* USART2 interrupt Init */
-    HAL_NVIC_SetPriority(USART2_IRQn, 0, 0);
+/* Lowest priority in the project's existing scheme.  The baseline scheme is
+       OTG_HS 4 > UCPD1 5 / GPDMA CH0-1 5 > GPDMA CH2-3 6.  Both UARTs are new
+       relative to the known-good baseline and were at 0, i.e. able to preempt
+       USB HS enumeration (4), UCPD1 (5) and every DMA channel - a plausible
+       cause of intermittent Windows Code 10.  7 keeps them below all of those
+       without reordering anything that already worked.  USART2 overrun loses
+       CLI keystrokes, which is benign; USART1 trace runs in DMA mode
+       (GPDMA CH3), so its IRQ is not on the byte path. */
+    HAL_NVIC_SetPriority(USART2_IRQn, 7, 0);
     HAL_NVIC_EnableIRQ(USART2_IRQn);
   /* USER CODE BEGIN USART2_MspInit 1 */
 
