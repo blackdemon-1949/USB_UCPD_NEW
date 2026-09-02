@@ -24,6 +24,17 @@
 #include "tracer_emb.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+/* The four fault vectors (HardFault_Handler, MemManage_Handler,
+ * BusFault_Handler, UsageFault_Handler) are implemented as naked asm
+ * trampolines in main.c so they can capture the hardware exception frame
+ * (stacked PC/LR) BEFORE any C prologue shifts the stack or clobbers the
+ * EXC_RETURN value in LR.  The stock C bodies below are renamed out of the
+ * way so this file still compiles after a CubeMX regeneration; the vector
+ * table in the startup file binds to the main.c symbols of the same name. */
+#define HardFault_Handler    Appli_Stock_HardFault_Handler_unused
+#define MemManage_Handler    Appli_Stock_MemManage_Handler_unused
+#define BusFault_Handler     Appli_Stock_BusFault_Handler_unused
+#define UsageFault_Handler   Appli_Stock_UsageFault_Handler_unused
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/

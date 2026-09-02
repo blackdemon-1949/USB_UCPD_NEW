@@ -107,9 +107,129 @@ volatile uint32_t APP_FaultMMAR;
 volatile uint32_t APP_FaultBFAR;
 volatile uint32_t APP_FaultCode;
 
-void APP_FaultReport(uint32_t code)
+/* ------------------------------------------------------------------ */
+/* Fault record in backup SRAM (4 KiB bank at 0x38800000).             */
+/*                                                                     */
+/* Address plan of the bank - two owners, they must not overlap:       */
+/*   [0x000, 0x100)  APP_STORE_Cfg_t  (app_store.c, APP_STORE_BKPSRAM) */
+/*   [0x200, 0x240)  this fault record (below)                         */
+/*                                                                     */
+/* The record used to sit at offset 0, on top of the store config: a   */
+/* crash destroyed the saved profile, and a 'store save' erased a      */
+/* crash record.  Neither owner may write the other's area.            */
+/* ------------------------------------------------------------------ */
+#define APP_FAULT_BKPSRAM_BASE   0x38800000uL
+#define APP_FAULT_RECORD_OFFSET  0x200u
+#define APP_FAULT_RECORD_MAGIC   0xFA017EDDuL
+
+/* ------------------------------------------------------------------ */
+/* Fault vector trampolines (naked)                                     */
+/*                                                                      */
+/* The vector table in the startup file calls these symbols directly    */
+/* from exception entry.  They MUST run before any C prologue so that:  */
+/*   - SP still points at the 8-word hardware exception frame that the  */
+/*     CPU pushed (R0,R1,R2,R3,R12,LR,PC,xPSR): PC is frame[6], LR is   */
+/*     frame[5];                                                        */
+/*   - LR still holds EXC_RETURN (bit 2 selects MSP vs PSP), which a C  */
+/*     compiler-generated `bl` would have clobbered.                    */
+/* Each trampoline tail-branches so no return address is pushed and no  */
+/* register is clobbered.  The stock C bodies of the same names live in */
+/* stm32h7rsxx_it.c but are #define-renamed away, so a CubeMX           */
+/* regeneration cannot reintroduce a duplicate symbol. */
+#define APP_FAULT_TRAMPOLINE(name, codev)                                 \
+  void name(void) __attribute__((naked, used));                           \
+  void name(void)                                                         \
+  {                                                                       \
+    __asm volatile(                                                       \
+        "  tst   lr, #4            \n"                                   \
+        "  ite   eq                \n"                                   \
+        "  mrseq r0, msp           \n"                                   \
+        "  mrsne r0, psp           \n"                                   \
+        "  ldr   r1, =%[cd]        \n"                                   \
+        "  b     APP_FaultReportCore\n"                                  \
+        : : [cd] "i" (codev));                                           \
+  }
+
+/* The `b` is relocatable by the linker.  The PC so captured is the
+ * faulting instruction in the Appli XIP image (0x90000000) or in the
+ * Boot image. */
+APP_FAULT_TRAMPOLINE(HardFault_Handler, 2u)
+APP_FAULT_TRAMPOLINE(MemManage_Handler, 3u)
+APP_FAULT_TRAMPOLINE(BusFault_Handler, 4u)
+APP_FAULT_TRAMPOLINE(UsageFault_Handler, 5u)
+
+/* Common tail for the trampolines above: r0 = exception frame base,     */
+/* r1 = fault code.                                                      */
+void APP_FaultReportCore(uint32_t *frame, uint32_t code);
+
+
+/* Bounded, interrupt-free, register-level USART1 output for the crash
+ * record.  This is the PD trace UART (PB6/PB7 @ 921600, TRACER_EMB/DMA
+ * owned).  After a fault the DMA/IRQ machinery may be dead, so this talks
+ * to the peripheral registers directly and never waits forever: if the
+ * UART clock is gone the LED blink must still happen.  The dump survives a
+ * full power cycle that would clear backup SRAM. */
+#define APP_FAULT_UART_SPIN 200000uL
+
+static void FaultUartByte(USART_TypeDef *u, uint8_t c)
 {
-  volatile uint32_t *bkp = (volatile uint32_t *)0x38800000uL; /* BKPSRAM */
+  uint32_t guard = APP_FAULT_UART_SPIN;
+
+  while (((u->ISR & USART_ISR_TXE) == 0u) && (guard != 0u))
+  {
+    guard--;
+  }
+  if (guard != 0u)
+  {
+    u->TDR = c;
+  }
+}
+
+static void FaultUartPuts(USART_TypeDef *u, const char *s)
+{
+  while (*s != '\0')
+  {
+    FaultUartByte(u, (uint8_t)*s);
+    s++;
+  }
+}
+
+static void FaultUartHex32(USART_TypeDef *u, uint32_t v)
+{
+  static const char hx[16] = { '0','1','2','3','4','5','6','7',
+                               '8','9','A','B','C','D','E','F' };
+  char tmp[10];
+  uint32_t i;
+
+  tmp[0] = '0';
+  tmp[1] = 'x';
+  for (i = 0u; i < 8u; i++)
+  {
+    tmp[2u + i] = hx[(v >> (28u - (4u * i))) & 0xFu];
+  }
+  for (i = 0u; i < 10u; i++)
+  {
+    FaultUartByte(u, (uint8_t)tmp[i]);
+  }
+}
+
+static void FaultUartFlush(USART_TypeDef *u)
+{
+  uint32_t guard = APP_FAULT_UART_SPIN;
+
+  while (((u->ISR & USART_ISR_TC) == 0u) && (guard != 0u))
+  {
+    guard--;
+  }
+}
+
+void APP_FaultReportCore(uint32_t *frame, uint32_t code)
+{
+  volatile uint32_t *rec =
+    (volatile uint32_t *)(APP_FAULT_BKPSRAM_BASE + APP_FAULT_RECORD_OFFSET);
+  uint32_t pc = 0u;
+  uint32_t lr = 0u;
+  uint32_t xpsr = 0u;
 
   APP_FaultCode = code;
   APP_FaultCFSR = SCB->CFSR;
@@ -117,18 +237,60 @@ void APP_FaultReport(uint32_t code)
   APP_FaultMMAR = SCB->MMFAR;
   APP_FaultBFAR = SCB->BFAR;
 
+  if (frame != NULL)
+  {
+    /* Hardware exception frame: R0,R1,R2,R3,R12,LR,PC,xPSR (8 words). */
+    pc   = frame[6];
+    lr   = frame[5];
+    xpsr = frame[7];
+  }
+
   /* Survive the reset.  A fault that only blinks an LED tells us almost
    * nothing; BKPSRAM is retained across a warm reset, so stash the fault
-   * registers there and let the next boot print them.  That turns
-   * "it bricks" into an exact fault type and faulting address. */
-  bkp[0] = 0xFA017EDDuL;   /* magic */
-  bkp[1] = code;
-  bkp[2] = APP_FaultCFSR;
-  bkp[3] = APP_FaultHFSR;
-  bkp[4] = APP_FaultMMAR;
-  bkp[5] = APP_FaultBFAR;
+   * registers and the faulting PC there and let the next boot print them.
+   * That turns "it bricks" into an exact fault type and faulting address.
+   * The bank is mapped non-cacheable (MPU region 5), so these stores reach
+   * the RAM itself and are not lost when the reset drops the D-cache. */
+  rec[0] = APP_FAULT_RECORD_MAGIC;
+  rec[1] = code;
+  rec[2] = APP_FaultCFSR;
+  rec[3] = APP_FaultHFSR;
+  rec[4] = APP_FaultMMAR;
+  rec[5] = APP_FaultBFAR;
+  rec[6] = pc;
+  rec[7] = lr;
+  rec[8] = xpsr;
+  __DSB();
+  __ISB();
+
+  /* Live one-shot record on the trace UART (survives power-off). */
+  __disable_irq();
+  FaultUartPuts(USART1, "\r\n***FAULT code=");
+  FaultUartHex32(USART1, code);
+  FaultUartPuts(USART1, " CFSR=");
+  FaultUartHex32(USART1, APP_FaultCFSR);
+  FaultUartPuts(USART1, " HFSR=");
+  FaultUartHex32(USART1, APP_FaultHFSR);
+  if (pc != 0u)
+  {
+    FaultUartPuts(USART1, " PC=");
+    FaultUartHex32(USART1, pc);
+    FaultUartPuts(USART1, " LR=");
+    FaultUartHex32(USART1, lr);
+    FaultUartPuts(USART1, " xPSR=");
+    FaultUartHex32(USART1, xpsr);
+  }
+  FaultUartPuts(USART1, "\r\n");
+  FaultUartFlush(USART1);
 
   Appli_Fail((uint8_t)code);
+}
+
+/* Legacy wrapper: no exception frame available (not called from a fault
+ * handler entry), so PC/LR are recorded as 0. */
+void APP_FaultReport(uint32_t code)
+{
+  APP_FaultReportCore(NULL, code);
 }
 
 /**
@@ -136,22 +298,69 @@ void APP_FaultReport(uint32_t code)
   */
 void APP_FaultReportBoot(void)
 {
-  volatile uint32_t *bkp = (volatile uint32_t *)0x38800000uL;
+  volatile uint32_t *rec =
+    (volatile uint32_t *)(APP_FAULT_BKPSRAM_BASE + APP_FAULT_RECORD_OFFSET);
+  const char *name;
+  uint32_t pc;
 
-  if (bkp[0] != 0xFA017EDDuL)
+  if (rec[0] != APP_FAULT_RECORD_MAGIC)
   {
     return;
   }
+  name = (rec[1] == 2u) ? "HardFault" :
+         (rec[1] == 3u) ? "MemManage" :
+         (rec[1] == 4u) ? "BusFault"  :
+         (rec[1] == 5u) ? "UsageFault" : "Error_Handler";
+  pc = rec[6];
+
   APP_LOG_Printf("\r\n*** PREVIOUS RUN FAULTED: %s (code %lu)\r\n",
-                 (bkp[1] == 2u) ? "HardFault" :
-                 (bkp[1] == 3u) ? "MemManage" :
-                 (bkp[1] == 4u) ? "BusFault"  :
-                 (bkp[1] == 5u) ? "UsageFault" : "Error_Handler",
-                 (unsigned long)bkp[1]);
+                 name, (unsigned long)rec[1]);
+  if (pc != 0u)
+  {
+    APP_LOG_Printf("    PC   = 0x%08lX   LR = 0x%08lX   xPSR = 0x%08lX\r\n",
+                   (unsigned long)pc, (unsigned long)rec[7],
+                   (unsigned long)rec[8]);
+    /* The Appli image executes from XIP NOR at 0x90000000, so the PC is a
+     * link-time virtual address in Appli_*.elf.  Give the exact decode
+     * command instead of leaving the user to guess the tool. */
+    if ((pc >= 0x90000000uL) && (pc < 0x90080000uL))
+    {
+      APP_LOG_Printf("    decode: arm-none-eabi-addr2line -e "
+                     "Appli/Release/Appli_Release.elf -f -C 0x%08lX\r\n",
+                     (unsigned long)pc);
+    }
+    else if ((pc >= 0x08000000uL) && (pc < 0x08010000uL))
+    {
+      APP_LOG_Printf("    PC is in the internal-flash Boot image\r\n");
+    }
+    else
+    {
+      APP_LOG_Printf("    PC is outside the Appli XIP window "
+                     "(0x90000000..0x90080000)\r\n");
+    }
+  }
+  else
+  {
+    APP_LOG_Printf("    PC/LR not captured (record from a non-handler "
+                   "APP_FaultReport call?)\r\n");
+  }
   APP_LOG_Printf("    CFSR=0x%08lX HFSR=0x%08lX MMFAR=0x%08lX BFAR=0x%08lX\r\n",
-                 (unsigned long)bkp[2], (unsigned long)bkp[3],
-                 (unsigned long)bkp[4], (unsigned long)bkp[5]);
-  bkp[0] = 0u;
+                 (unsigned long)rec[2], (unsigned long)rec[3],
+                 (unsigned long)rec[4], (unsigned long)rec[5]);
+  if ((rec[2] & 0x80u) != 0u)
+  {
+    APP_LOG_Printf("    (MMFAR valid: 0x%08lX)\r\n", (unsigned long)rec[4]);
+  }
+  if ((rec[2] & 0x8000u) != 0u)
+  {
+    APP_LOG_Printf("    (BFAR valid: 0x%08lX)\r\n", (unsigned long)rec[5]);
+  }
+  if ((rec[3] & 0x40000000uL) != 0uL)
+  {
+    APP_LOG_Printf("    (HFSR FORCED: escalated from a configurable fault "
+                   "- see CFSR bits)\r\n");
+  }
+  rec[0] = 0u;
 }
 
 /** Public wrapper so middleware (usbpd.c) can report a fatal init error
@@ -410,6 +619,38 @@ static void MPU_Config(void)
   MPU_InitStruct.AccessPermission = MPU_REGION_FULL_ACCESS;
   MPU_InitStruct.DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE;
   MPU_InitStruct.IsShareable = MPU_ACCESS_SHAREABLE;
+  MPU_InitStruct.IsCacheable = MPU_ACCESS_NOT_CACHEABLE;
+  MPU_InitStruct.IsBufferable = MPU_ACCESS_NOT_BUFFERABLE;
+  HAL_MPU_ConfigRegion(&MPU_InitStruct);
+
+  /** Region 5: backup SRAM 0x38800000 (4 KiB) - NON-CACHEABLE.
+   *
+   * Region 0 (4 GB no-access background) disables its subregions 0, 1, 2
+   * and 7 (0x87), but a disabled subregion is *not* protected - it falls
+   * through to the Cortex-M7 default memory map.  Subregion 1 is
+   * 0x20000000..0x3FFFFFFF, so 0x38800000 was left on the default map:
+   * Normal, write-back, cacheable.  Every BKPSRAM access - the fault
+   * record in APP_FaultReportCore() and the 'store' configuration in
+   * app_store.c - was then served from the D-cache and never reached the
+   * RAM itself.  A warm reset discards dirty cache lines, which is exactly
+   * why "PREVIOUS RUN FAULTED" never printed and saved profiles did not
+   * survive a reset.
+   *
+   * This region makes the whole 4 KiB bank non-cacheable, so writes become
+   * visible to the backup domain immediately and survive NRST (and VDD
+   * loss while the backup regulator holds the bank).  It overlaps nothing:
+   * region 0 does not cover subregion 1, and no other region matches this
+   * address.  The bank is 4 KiB, so a 4 KiB region at 0x38800000 is
+   * correctly aligned.
+   */
+  MPU_InitStruct.Number = MPU_REGION_NUMBER5;
+  MPU_InitStruct.BaseAddress = 0x38800000;
+  MPU_InitStruct.Size = MPU_REGION_SIZE_4KB;
+  MPU_InitStruct.SubRegionDisable = 0x0;
+  MPU_InitStruct.TypeExtField = MPU_TEX_LEVEL0;
+  MPU_InitStruct.AccessPermission = MPU_REGION_FULL_ACCESS;
+  MPU_InitStruct.DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE;
+  MPU_InitStruct.IsShareable = MPU_ACCESS_NOT_SHAREABLE;
   MPU_InitStruct.IsCacheable = MPU_ACCESS_NOT_CACHEABLE;
   MPU_InitStruct.IsBufferable = MPU_ACCESS_NOT_BUFFERABLE;
   HAL_MPU_ConfigRegion(&MPU_InitStruct);
