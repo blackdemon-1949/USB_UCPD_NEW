@@ -216,6 +216,10 @@ def main():
     ap.add_argument('--extra-defines', nargs='*', default=[],
                     metavar='NAME=VAL',
                     help='extra -D flags, e.g. APP_ENG_CAPTURE=0 to bisect')
+    ap.add_argument('--analyzer', action='store_true',
+                    help='re-enable every optional analyzer engine '
+                         '(capture/txn/ext/analytics/store/fuzz/test).  The '
+                         'shipped default is the CORE PD bench profile.')
     ap.add_argument('--core', action='store_true',
                     help='CORE PD bench profile: PD/PPS/AVS/EPR/VDM/cable/'
                          'INA226/diagnostics/CLI only; capture, transaction, '
@@ -239,7 +243,12 @@ def main():
         'APP_ENG_CABLE_VDM': '1',
         'APP_ENG_DIAG': '1',
     }
-    if a.core:
+    if a.analyzer:
+        # Explicitly turn everything back on; app_engines.h defaults to CORE.
+        EXTRA_DEFINES = ['%s=1' % k for k in sorted(CORE_PROFILE)]
+        EXTRA_DEFINES += list(a.extra_defines)
+    elif a.core:
+        # Equivalent to the shipped defaults, kept for explicitness.
         EXTRA_DEFINES = ['%s=%s' % kv for kv in sorted(CORE_PROFILE.items())]
         EXTRA_DEFINES += list(a.extra_defines)
     else:

@@ -37,14 +37,22 @@
 #ifndef APP_ENGINES_H
 #define APP_ENGINES_H
 
+/* DEFAULT IS THE CORE PD BENCH PROFILE.
+ *
+ * The optional analyzer engines are compiled OUT by default so the shipped
+ * firmware is the stable PD/PPS/EPR/VDM/cable/diagnostics/INA226 build.  They
+ * are still fully present in the tree and host-tested; re-enable any of them
+ * individually with -DAPP_ENG_xxx=1, or pass --analyzer to tools/build.py.
+ * `build.py --core` remains valid and is now equivalent to the defaults. */
+
 /** RAM capture ring + takeover of the ST PD trace entry point. */
 #ifndef APP_ENG_CAPTURE
-#define APP_ENG_CAPTURE        1
+#define APP_ENG_CAPTURE        0
 #endif
 
 /** Transaction reconstruction.  Requires APP_ENG_CAPTURE for live data. */
 #ifndef APP_ENG_TXN
-#define APP_ENG_TXN            1
+#define APP_ENG_TXN            0
 #endif
 
 /** Cable / E-marker engine and VDM callback registration. */
@@ -69,27 +77,27 @@
 
 /** Main-loop periodic analytics: power sampling, DTS temperature, txn poll. */
 #ifndef APP_ENG_ANALYTICS
-#define APP_ENG_ANALYTICS      1
+#define APP_ENG_ANALYTICS      0
 #endif
 
 /** Backup-SRAM persistence init.  Never writes NOR. */
 #ifndef APP_ENG_STORE
-#define APP_ENG_STORE          1
+#define APP_ENG_STORE          0
 #endif
 
 /** Chunked extended-message reassembly.  Requires APP_ENG_CAPTURE. */
 #ifndef APP_ENG_EXT
-#define APP_ENG_EXT            1
+#define APP_ENG_EXT            0
 #endif
 
 /** Malformed-message (fuzz) engine.  Test-only; adds no background load. */
 #ifndef APP_ENG_FUZZ
-#define APP_ENG_FUZZ           1
+#define APP_ENG_FUZZ           0
 #endif
 
 /** On-target deterministic protocol test vectors.  Test-only. */
 #ifndef APP_ENG_TEST
-#define APP_ENG_TEST           1
+#define APP_ENG_TEST           0
 #endif
 
 /** One-line summary of what is compiled out, printed once at startup so the
