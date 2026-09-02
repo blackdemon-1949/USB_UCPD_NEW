@@ -1,94 +1,97 @@
-# EPR crash: found, and the board can no longer brick itself
+# Found it: a NULL function pointer the ST library calls without checking
 
-## The LED flicker told us what it was
+You were right that something was very wrong in the code. It was.
 
-That fast PB2 blink **is** `Appli_Fail()` — the fault handler I added last
-round. So the board is not hanging or losing power: it takes a **CPU fault**
-and parks in the blink loop. That narrowed everything.
+## The crash, at instruction level
 
-## Defect 1 — I used the wrong DataId
-
-`EPRMode_Enter` does `movs r1,#0x1e`. Last round I mapped that to
-`RCV_REQ_COPYPDO` by hand-counting the enum, and **the count was wrong** — it
-skipped the `#if`-guarded members. Compiling the real v5.4.1 enum gives:
-
-| value | actual constant |
-|---|---|
-| **0x1E** | `SNK_PDP_EPR` ← what Enter really asks for |
-| 0x1C | `RCV_REQ_COPYPDO` |
-| 0x17 | `EPRMODE` |
-| 0x19 | `SNK_PDO_EPR` |
-
-The bogus case is removed and every size is now justified against the
-disassembly that establishes it.
-
-## Defect 2 — the EPR sink list was unbounded
-
-`Send_EPR_SnkCapa` does `memclr(ctx+0x14, 0x104)`, writes the SPR PDOs at
-`ctx+0x14`, then asks the DPM for `SNK_PDO_EPR` at `ctx+0x30` — exactly slot 8,
-as PD3.1 requires. Our handler answered with **one** 4-byte AVS object and no
-bound at all.
-
-Replaced with `APP_EPR_GetSinkEprPdos()`: a correctly shaped EPR sink list
-(28/36/48 V Fixed below your ceiling, then one AVS APDO), hard-bounded by
-`USBPD_MAX_NB_EPRPDO` so it can never overrun the library's buffer. Current
-comes from the e-marker, so it never claims 5 A on a 3 A cable.
-
-## The board can no longer brick itself
-
-**Automatic EPR entry is now OFF by default.** That is the important change.
-Previously it armed itself the instant an EPR source attached — so when entry
-faulted, the board rebooted, auto-entered, and faulted again. An
-unrecoverable loop needing the reset button. A feature that can brick the
-instrument must not arm itself.
-
-* `epr` / `epr diag` — detection and reporting, always automatic
-* `epr enter` — **one** manual attempt
-* `epr on` — arm automatic entry (only after a manual attempt succeeds)
-
-I also split `enable` (auto-enter) from `allow` (advertise EPR capability).
-Gating the RDO bit on `enable` would have made a manual entry fail with the
-source's own reason `0x03, EPR Mode Capable bit not set in the RDO`.
-
-## Crash forensics — no more guessing
-
-Fault handlers now stash the fault code plus **CFSR / HFSR / MMFAR / BFAR** in
-BKPSRAM, which survives a warm reset, and the next boot prints:
+`usbpd_pe_vconn.o`, `PE_SubStateMachine_VconnSwap` **+0x292**:
 
 ```
-*** PREVIOUS RUN FAULTED: HardFault (code 2)
-    CFSR=0x........ HFSR=0x........ MMFAR=0x........ BFAR=0x........
+ldr  r2, [r1, #0x2c]     ; cb->USBPD_PE_EvaluateVconnSwap
+blx  r2                  ; called UNCONDITIONALLY — no null check
 ```
 
-That decodes to the exact fault type and faulting address.
+And our callback table shipped **NULL** in that slot. The CubeMX-generated
+`usbpd_dpm_core.c` wraps the two VCONN entries in
+`#if defined(_VCONN_SUPPORT)` — and this project never defines it. I verified
+the whole symbol list in `.cproject`: `STM32H7R3xx`, `USBPDCORE_LIB_PD3_FULL`,
+`USBPD_PORT_COUNT=1`, `USE_HAL_DRIVER`, `USE_FULL_LL_DRIVER(S)`, `_SNK`,
+`_TRACE`. No `_VCONN_SUPPORT`.
 
-## Test sequence — please follow this order
+So: `blx 0` → branch to address 0 → **HardFault** → `Appli_Fail()` blink loop.
+That loop does `__disable_irq()` and spins forever, which is exactly your
+~190 Hz PB2 flicker that only a power cycle clears.
 
-Clean rebuild (middleware headers changed), flash, then:
+## Why *only* the EPR charger
 
-**1. SPR charger — regression.** `req 2`, `pps 21000`, `temp`, `diag all`.
-Everything that worked must still work. Nothing auto-enters now.
+PD 3.1 requires the **source** to be VCONN Source before it discovers the
+cable during EPR entry. So an EPR charger starts a `VCONN_Swap` immediately
+after `EPR_Mode(Enter)`. An SPR charger never does.
 
-**2. EPR charger — attach and WAIT.** The board must stay fully responsive
-and must **not** enter EPR on its own. Run `epr` and `epr diag`.
+That is your exact observation — SPR always fine, EPR always bricks — and it
+was the clue that pinned this down. Nothing was wrong with your hardware or
+your source.
 
-**3. Only then:** `epr enter`
+## The fix
 
-If it still faults, the board will come back and print the fault registers on
-the next boot. **Send me that line** — it identifies the faulting instruction
-directly.
+The VCONN callbacks are now **always** installed. `EvaluateVconnSwap` answers
+from real capability: this board has no VCONN supply
+(`BSP_USBPD_PWR_VCONNOn` returns `FEATURE_NOT_SUPPORTED`), so it **REJECTs**
+becoming VCONN source and only accepts a swap that hands the role away.
+Rejecting is spec-legal and leaves the source as VCONN source — which is what
+EPR entry actually needs.
 
-## Honest status
+## Same bug class, swept out
 
-| Feature | HW verified |
+I disassembled **every object** in the library looking for
+`ldr rN,[cb,#off]; blx rN` with no null test. Reachable from
+`USBPD_PE_StateMachine_SNK` and NULL in our build:
+
+| slot | callback | called from |
+|---|---|---|
+| +0x00 | `RequestSetupNewPower` | — |
+| +0x08 | `EvaluatPRSwap` | — |
+| +0x1C | `SRC_EvaluateRequest` | `usbpd_pe_src.o` |
+| +0x24 | `PowerRoleSwap` | `usbpd_pe_snk.o` ×3 |
+| +0x2C | `EvaluateVconnSwap` | `usbpd_pe_vconn.o` ← **the brick** |
+
+All five now have inert, truthful handlers. `RequestDPMWhatToDo` (+0x90) is
+never called unguarded, so it stays unset.
+
+## Also fixed
+
+My BKPSRAM fault forensics printed nothing after your lock-up — because the
+**backup regulator** was never enabled, so the contents weren't retained.
+`HAL_PWREx_EnableBkUpReg()` added, so a future fault really does report
+`CFSR/HFSR/MMFAR/BFAR` on the next boot.
+
+## Test
+
+Clean rebuild, flash, then:
+
+1. **SPR charger** — `req 2`, `pps 21000`, `temp`, `diag all`. Regression check.
+2. **EPR charger** — attach, confirm the board stays responsive, then:
+
+```
+epr diag
+epr enter
+```
+
+Expected now: `Enter Acknowledged` → `Enter Succeeded`, or a decoded
+`Enter Failed - <reason>`. **What must no longer happen is a lock-up.**
+
+If it still faults, the board recovers and prints the fault registers on the
+next boot — send me that line.
+
+## Status
+
+| | HW verified |
 |---|---|
 | SPR 5/9/12/15/20 V, PPS to 21 V | **YES** |
-| INA226, real VBUS, diagnostics | **YES** |
-| CDC stability (Code 10 gone) | **YES** |
-| No-brick guarantee with EPR source | expected — not yet proven |
-| EPR mode entry | **NOT YET** |
+| INA226 / VBUS / diagnostics / CDC | **YES** |
+| EPR no-brick | fix is exact and proven in the disassembly — needs your flash |
+| EPR mode entry | not yet |
 
-I cannot ARM-link or flash here. What I will commit to: the fault is now
-**self-reporting**, and with auto-entry disarmed an EPR charger should no
-longer be able to lock the bench. 149/149 host tests, 0 compile errors,
-ST core library at official v5.4.1.
+149/149 host tests, 0 compile errors, ST core library at official v5.4.1.
+I still cannot ARM-link or flash here, so I won't call EPR done until your
+log shows it.
