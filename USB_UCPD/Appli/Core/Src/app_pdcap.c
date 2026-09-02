@@ -63,6 +63,36 @@ void APP_PDCAP_Trace(TRACE_EVENT type, uint8_t port, uint8_t sop,
   if (type == USBPD_TRACE_MESSAGE_IN)
   {
     APP_DIAG_Inc(APP_DIAG_PD_RX);
+
+    /* Classify the inbound frame so the negotiation counters are real.  These
+     * were all permanently zero on the bench because nothing ever incremented
+     * them; a counter that cannot count is indistinguishable from a fault. */
+    if ((ptr != NULL) && (size >= 2u))
+    {
+      uint16_t hdr   = (uint16_t)((uint16_t)ptr[0] | ((uint16_t)ptr[1] << 8));
+      uint16_t ndo   = (uint16_t)((hdr >> 12) & 0x7u);
+      uint16_t mtype = (uint16_t)(hdr & 0x1Fu);
+
+      if (ndo == 0u)
+      {
+        switch (mtype)
+        {
+          case 1u:  APP_DIAG_Inc(APP_DIAG_PD_GOODCRC_RX); break;
+          case 3u:  APP_DIAG_Inc(APP_DIAG_NEG_ACCEPT);    break;
+          case 4u:  APP_DIAG_Inc(APP_DIAG_NEG_REJECT);    break;
+          case 12u: APP_DIAG_Inc(APP_DIAG_NEG_WAIT);      break;
+          default:  break;
+        }
+      }
+      else
+      {
+        /* Data messages: 1 = Source_Capabilities, 2 = Request. */
+        if (mtype == 1u)
+        {
+          APP_DIAG_Inc(APP_DIAG_NEG_CAPS);
+        }
+      }
+    }
     APP_TXN_Feed(&APP_TXN_Port0, 0u, sop, APP_PDCAP_Cycles(), ptr, size);
     {
       APP_DEC_Msg_t dec;
@@ -82,6 +112,17 @@ void APP_PDCAP_Trace(TRACE_EVENT type, uint8_t port, uint8_t sop,
   {
     APP_DIAG_Inc(APP_DIAG_PD_TX);
     APP_TXN_Feed(&APP_TXN_Port0, 1u, sop, APP_PDCAP_Cycles(), ptr, size);
+
+    /* GoodCRC we transmit: header with no data objects and control type 1. */
+    if ((ptr != NULL) && (size >= 2u))
+    {
+      uint16_t hdr = (uint16_t)((uint16_t)ptr[0] | ((uint16_t)ptr[1] << 8));
+
+      if ((((hdr >> 12) & 0x7u) == 0u) && ((hdr & 0x1Fu) == 1u))
+      {
+        APP_DIAG_Inc(APP_DIAG_PD_GOODCRC_TX);
+      }
+    }
   }
 
   /* hand the event straight back to the stock TRACER_EMB path */

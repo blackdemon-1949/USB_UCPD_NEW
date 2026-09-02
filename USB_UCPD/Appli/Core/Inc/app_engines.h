@@ -37,22 +37,33 @@
 #ifndef APP_ENGINES_H
 #define APP_ENGINES_H
 
-/* DEFAULT IS THE CORE PD BENCH PROFILE.
+/* DEFAULT IS THE FULL BENCH PROFILE.
  *
- * The optional analyzer engines are compiled OUT by default so the shipped
- * firmware is the stable PD/PPS/EPR/VDM/cable/diagnostics/INA226 build.  They
- * are still fully present in the tree and host-tested; re-enable any of them
- * individually with -DAPP_ENG_xxx=1, or pass --analyzer to tools/build.py.
- * `build.py --core` remains valid and is now equivalent to the defaults. */
+ * Everything that carries real diagnostic value is now compiled IN: capture,
+ * transaction reconstruction, chunked extended messages, analytics, cable /
+ * e-marker, EPR, VDM and the diagnostic counters.
+ *
+ * APP_ENG_CAPTURE in particular is no longer optional in practice.  It owns
+ * the ST trace funnel, and with it disabled the PD TX/RX/GoodCRC counters and
+ * the whole transaction view were structurally dead - the bench log showed
+ * pd_rx/pd_tx frozen and every negotiation counter at zero while PD was
+ * plainly running.  A diagnostic tool whose diagnostics are compiled out is
+ * worse than useless, so the analyzer path ships enabled.
+ *
+ * Still OFF by design (test-only, add instability, no bench value):
+ *   APP_ENG_FUZZ  - deliberately transmits malformed messages
+ *   APP_ENG_TEST  - on-target vector suite
+ *   APP_ENG_STORE - backup-SRAM persistence
+ * Disable any engine individually with -DAPP_ENG_xxx=0. */
 
 /** RAM capture ring + takeover of the ST PD trace entry point. */
 #ifndef APP_ENG_CAPTURE
-#define APP_ENG_CAPTURE        0
+#define APP_ENG_CAPTURE        1
 #endif
 
 /** Transaction reconstruction.  Requires APP_ENG_CAPTURE for live data. */
 #ifndef APP_ENG_TXN
-#define APP_ENG_TXN            0
+#define APP_ENG_TXN            1
 #endif
 
 /** Cable / E-marker engine and VDM callback registration. */
@@ -77,7 +88,7 @@
 
 /** Main-loop periodic analytics: power sampling, DTS temperature, txn poll. */
 #ifndef APP_ENG_ANALYTICS
-#define APP_ENG_ANALYTICS      0
+#define APP_ENG_ANALYTICS      1
 #endif
 
 /** Backup-SRAM persistence init.  Never writes NOR. */
@@ -87,7 +98,7 @@
 
 /** Chunked extended-message reassembly.  Requires APP_ENG_CAPTURE. */
 #ifndef APP_ENG_EXT
-#define APP_ENG_EXT            0
+#define APP_ENG_EXT            1
 #endif
 
 /** Malformed-message (fuzz) engine.  Test-only; adds no background load. */

@@ -3,6 +3,7 @@
 #include "app_epr.h"
 #include "app_pps.h"
 #include "app_log.h"
+#include "app_diag.h"
 #include "app_board.h"
 #include "usbpd_pdo_defs.h"
 #include "usbpd_dpm_conf.h"
@@ -106,6 +107,8 @@ void APP_PD_OnCable(uint8_t port, USBPD_CAD_EVENT ev)
       s_epr_enter_at = 0U;
       s_caps_printed = 0U;
       APP_LED_Set(APP_LED_PD_WAIT);
+      APP_DIAG_Inc(APP_DIAG_ATTACH);
+      APP_DIAG_Inc(APP_DIAG_CAD_EVENT);
       APP_LOG_Printf("\r\n[PD] CC attached (event %u, CC%u)\r\n",
                      (unsigned)ev, (unsigned)APP_PD_Port[port].CCx);
       break;
@@ -125,6 +128,8 @@ void APP_PD_OnCable(uint8_t port, USBPD_CAD_EVENT ev)
       s_caps_printed = 0U;
       s_sweep_active = 0U;
       APP_LED_Set(APP_LED_HEARTBEAT);
+      APP_DIAG_Inc(APP_DIAG_DETACH);
+      APP_DIAG_Inc(APP_DIAG_CAD_EVENT);
       APP_LOG_Printf("\r\n[PD] CC detached\r\n");
       break;
   }
@@ -141,6 +146,7 @@ void APP_PD_OnNotify(uint8_t port, USBPD_NotifyEventValue_TypeDef ev)
   {
     case USBPD_NOTIFY_POWER_EXPLICIT_CONTRACT:
       APP_PD_Port[port].Contract = 1U;
+      APP_DIAG_Inc(APP_DIAG_NEG_CONTRACT);
       APP_LED_Set(APP_LED_PD_CONTRACT);
       APP_LOG_Printf("[PD] explicit contract  %lu mV / %lu mA  (PDO %lu)\r\n",
                      (unsigned long)APP_PD_Port[port].RequestedVoltage,
@@ -151,9 +157,11 @@ void APP_PD_OnNotify(uint8_t port, USBPD_NotifyEventValue_TypeDef ev)
       APP_LOG_Write("[PD] REQUEST accepted\r\n");
       break;
     case USBPD_NOTIFY_REQUEST_REJECTED:
+      APP_DIAG_Inc(APP_DIAG_NEG_REJECT);
       APP_LOG_Write("[PD] REQUEST rejected\r\n");
       break;
     case USBPD_NOTIFY_REQUEST_WAIT:
+      APP_DIAG_Inc(APP_DIAG_NEG_WAIT);
       APP_LOG_Write("[PD] REQUEST wait\r\n");
       break;
     case USBPD_NOTIFY_HARDRESET_RX:
@@ -169,6 +177,7 @@ void APP_PD_OnNotify(uint8_t port, USBPD_NotifyEventValue_TypeDef ev)
       s_epr_enter_tries = 0U;
       s_epr_enter_at = 0U;
       APP_LED_Set(APP_PD_Port[port].Attached ? APP_LED_PD_WAIT : APP_LED_HEARTBEAT);
+      APP_DIAG_Inc(APP_DIAG_PD_HARD_RESET);
       APP_LOG_Write("[PD] hard reset\r\n");
       break;
     case USBPD_NOTIFY_STATE_SNK_READY:
@@ -703,10 +712,28 @@ USBPD_StatusTypeDef APP_PD_SendRequest(uint8_t port, uint8_t index, uint16_t mv,
     return USBPD_ERROR;
   }
 
+  APP_DIAG_Inc(APP_DIAG_NEG_REQUEST);
   st = USBPD_PE_Send_Request(port, rdo, type);
   if (st != USBPD_OK)
   {
-    APP_LOG_Printf("REQUEST not accepted by stack (%d)\r\n", (int)st);
+    /* Say WHY.  USBPD_PE_Send_Request (usbpd_pe.o +0x526) gates on
+     * (Params & 0x704) == 0x300, i.e. connected + SNK + explicit contract -
+     * the same gate the EPR entry points use.  Naming the missing
+     * precondition turns "not accepted (3)" into something actionable. */
+    uint32_t w;
+    memcpy(&w, &DPM_Params[port], sizeof(w));
+    APP_LOG_Printf("REQUEST not accepted by stack: %s (%d)\r\n",
+                   APP_EPR_StatusName((int)st), (int)st);
+    APP_LOG_Printf("  PE state: connected=%u role=%s contract=%s\r\n",
+                   (unsigned)((w >> 12) & 1u),
+                   (((w >> 2) & 1u) != 0u) ? "SRC" : "SNK",
+                   APP_EPR_PowerStateName((uint8_t)((w >> 8) & 7u)));
+    if (((w & 0x704u) != 0x300u))
+    {
+      APP_LOG_Write("  -> no SPR explicit contract yet; the source has not "
+                    "completed Accept/PS_RDY. Requests are refused until it "
+                    "does.\r\n");
+    }
   }
   else
   {

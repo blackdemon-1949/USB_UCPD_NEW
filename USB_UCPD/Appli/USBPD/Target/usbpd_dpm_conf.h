@@ -138,14 +138,24 @@ USBPD_USER_SettingsTypeDef       DPM_USER_Settings[USBPD_PORT_COUNT] =
 {
   {
     .PE_DataSwap = USBPD_TRUE,                  /* support data swap                                       */
-    /* HARDWARE TRUTH: this board has NO VCONN supply.
-     * BSP_USBPD_PWR_VCONNOn() returns BSP_ERROR_FEATURE_NOT_SUPPORTED, so
-     * advertising VCONN swap invites the source to hand us VCONN duty during
-     * EPR entry (PD3.1 requires the SOURCE to be VCONN source before it will
-     * discover the cable).  Accepting a swap we cannot honour leaves the
-     * cable unpowered and the entry AMS stalls with no reply - which matches
-     * the bench behaviour.  Declare the real capability. */
-    .PE_VconnSwap = USBPD_FALSE,                /* no VCONN supply on this board       */
+    /* VCONN swap: REVERTED to TRUE after the bench proved the change broke
+     * PD entirely.
+     *
+     * Setting this FALSE made USBPD_DPM_EvaluateVconnSwap() answer REJECT.
+     * The source needs VCONN to power the cable e-marker, and this source
+     * asks the sink for a VCONN swap during discovery; rejecting it made
+     * the source hard-reset in a loop, so PE_Power never reached
+     * EXPLICITCONTRACT.  USBPD_PE_Send_Request() (usbpd_pe.o +0x526) gates
+     * on (Params & 0x704) == 0x300 exactly like the EPR entry points, so
+     * EVERY request - 9 V, 12 V, 20 V, PPS and EPR alike - returned
+     * USBPD_BUSY(3).  That is the 'REQUEST not accepted by stack (3)'
+     * regression, and it was mine.
+     *
+     * VCONN here is supplied by the source through the cable, not by this
+     * board's own rail, so accepting the swap is correct.  If a swap ever
+     * needs refusing it must be done in USBPD_DPM_EvaluateVconnSwap() on
+     * real evidence, not by disabling the capability wholesale. */
+    .PE_VconnSwap = USBPD_TRUE,                 /* support VCONN swap                  */
     .PE_DR_Swap_To_DFP = USBPD_TRUE,                  /*  Support of DR Swap to DFP                                  */
     .PE_DR_Swap_To_UFP = USBPD_TRUE,                  /*  Support of DR Swap to UFP                                  */
      .DPM_SNKExtendedCapa =                        /*!< SNK Extended Capability        */

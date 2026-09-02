@@ -193,7 +193,7 @@ sample_fail:
   }
   s.present = 0U;
   s.meas_tick = 0U;              /* drop the stale measurement */
-  s.vbus_real = 0U;              /* PD falls back to synthetic vbus */
+  s.vbus_real = 0U;              /* no device: PD must use synthetic vbus */
   s.next_probe = HAL_GetTick() + INA226_PROBE_PERIOD_MS;
   APP_LOG_Write("[ina226] lost connection - no ina226 connected\r\n");
 }
@@ -284,6 +284,16 @@ static uint8_t ina_configure(void)
   s.next_meas = HAL_GetTick() + 100U;
   s.meas_tick = 0U;              /* no valid measurement yet */
   s.next_report = HAL_GetTick() + s.report_ms;
+
+  /* A monitor is present, so feed the PD stack the MEASURED rail.
+   *
+   * The synthetic value is set to the *requested* voltage as soon as an RDO
+   * is built, so between Accept and PS_RDY the PE was told VBUS had already
+   * moved while the rail was still sitting at 5 V.  USBPD_PWR_IF_SupplyReady()
+   * compares that number against the transition thresholds, so a lie there
+   * corrupts contract completion.  Use the real measurement by default;
+   * 'ina vbus synth' restores the synthetic source. */
+  s.vbus_real = 1U;
   return 1U;
 }
 
