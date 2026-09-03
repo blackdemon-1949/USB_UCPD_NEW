@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 # Host test gate for the PDEngine UCPD port driver (M2), the full-stack
-# SPR bench (M3) and the ST transport source (M4).
+# SPR bench (M3), the ST transport source + app glue (M4) and the EPR
+# benches (M5).
 #
-# Compiles the self-written UCPD driver
+# Compiles the self-written UCPD driver and the board app glue
 # (USB_UCPD/Middlewares/PDEngine/port) together with the pdsink core it
 # drives and runs:
 #
 #   - test_pdport_driver: the M2 driver unit suite (simulated transport)
-#   - test_pdport_stack:  the M3 full-stack bench (pdsink Task+TC+PRL+PE+
-#                         DPM over the driver, with a scripted source
-#                         partner negotiating real SPR contracts)
+#   - test_pdport_stack:  the M3 full-stack bench + M5 EPR bench (pdsink
+#                         Task+TC+PRL+PE+DPM over the driver, with a
+#                         scripted PD 3.1 EPR source partner)
+#   - test_pdport_app:    the M4-app board-glue suite - pdport_app.cpp
+#                         (the exact C seam the firmware application
+#                         modules call) driven end-to-end over the same
+#                         simulated transport and source partner
 #   - pd_tr_st.c syntax check: M4 transport parsed with the host gcc
 #     against the real STM32 headers and project defines (an ARM
 #     toolchain is not required for this; register accesses are plain
@@ -71,9 +76,11 @@ for f in "$ENGINE/pdsink/src/pd"/*.cpp "$ENGINE/pdsink/src/pd/utils"/*.cpp; do
   CORE_OBJS+=("$o")
 done
 
-# M2 port objects (driver + simulated transport)
+# M2 port objects (driver + simulated transport) and the M4-app board
+# glue (pdport_app.cpp) - compiled exactly as the firmware will build it.
 PORT_OBJS=()
-for f in "$PORT/src/pd_ucpd_driver.cpp" "$SUITE_DIR/pd_tr_sim.cpp"; do
+for f in "$PORT/src/pd_ucpd_driver.cpp" "$PORT/src/pdport_app.cpp" \
+         "$SUITE_DIR/pd_tr_sim.cpp"; do
   o="$OUT/port_$(basename "${f%.cpp}").o"
   g++ -std=gnu++17 -Wall -Wextra "${INCS[@]}" -c "$f" -o "$o" || exit 3
   PORT_OBJS+=("$o")
@@ -134,6 +141,34 @@ run_suite() {
 
 run_suite test_pdport_driver "$SUITE_DIR/test_pdport_driver.cpp"
 run_suite test_pdport_stack  "$SUITE_DIR/test_pdport_stack.cpp"
+
+# test_pdport_app drives the pdport_app.cpp object graph, which (like the
+# board) is created once per boot.  Each scenario therefore runs in its
+# own process = one cold boot per scenario.
+APP_SRC="$SUITE_DIR/test_pdport_app.cpp"
+APP_BIN="$OUT/test_pdport_app"
+g++ -std=gnu++17 "${INCS[@]}" "${GT_INCS[@]}" "$APP_SRC" \
+    "${CORE_OBJS[@]}" "${PORT_OBJS[@]}" "${GT_LIBS[@]}" -o "$APP_BIN" || exit 4
+APP_TESTS=(
+  InitStatusSprContractThenPpsAndDetach
+  EprEnterAvsContractThenTwoStepExitThenPpsThenReenter
+  EprEntryFailedStaysSprAndPpsStillWorks
+  EprCapsStallHardResetsThenRecoversAndApiStaysAlive
+  RefusalPathsAreTruthful
+)
+APP_PASS=0
+for t in "${APP_TESTS[@]}"; do
+  if "$APP_BIN" --gtest_filter="PdportApp.$t" \
+      >"$OUT/test_pdport_app_$t.txt" 2>&1; then
+    echo "  PASS test_pdport_app: PdportApp.$t"
+    APP_PASS=$((APP_PASS+1))
+  else
+    echo "  FAIL test_pdport_app: PdportApp.$t"
+    tail -40 "$OUT/test_pdport_app_$t.txt"
+    FAIL=$((FAIL+1))
+  fi
+done
+[ "$APP_PASS" -eq "${#APP_TESTS[@]}" ] && PASS=$((PASS+1))
 
 echo "== $PASS suites passed, $FAIL failed =="
 [ "$FAIL" -eq 0 ]
