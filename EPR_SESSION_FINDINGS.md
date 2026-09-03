@@ -1,5 +1,118 @@
 # EPR `epr enter` System Freeze — Session Findings
 
+> **Update 2026-09-03 (round 4, research + decisive real-EPR build):**
+> the "upgrade the core" hypothesis is **falsified** — the in-repo
+> `Core/lib/USBPDCORE_PD3_FULL_CM7_wc32.a` is **byte-identical** (md5
+> `82418ccd0c0f95bc620bdd6c5c6e014b`) to ST upstream
+> `STMicroelectronics/stm32-mw-usbpd-core` `main` (Release v5.4.1,
+> commit `aafa359`, 2026-06-16), and every `Core/inc` header is identical
+> too.  There is no newer core to swap in; this is the exact binary that
+> community reports show performing EPR on other STM32s (G0/G4) with the
+> stock DPM layer.  The freeze therefore lives in the closed PE/PRL run on
+> this integration, and the app-side audit is now complete (see "Round 4
+> findings" below).  Per the user's directive, this round ships the
+> **decisive real-EPR build**: the safe-gate refusals are lifted again
+> (files restored byte-for-byte to the never-benched 805f586-era state) so
+> the genuine `USBPD_PE_Request_EPRModeEnter` path can be exercised once on
+> the bench with every self-reporting instrument armed.  If it enters EPR
+> and stays alive, real EPR is delivered.  If it freezes, the next-boot
+> banner prints the exact fault PC/CFSR + decode command (or the blink code
+> identifies the fatal), which is the one datum the previous rounds never
+> captured.
+
+## 2026-09-03 round 4 findings (research before code)
+
+All from direct analysis of the shipped binary (`/home/user/scratch/eprx`,
+capstone Thumb disassembly + relocations):
+
+- **Core identity**: in-repo `.a` == upstream `main` `.a` (md5 equal); all
+  `Core/inc` headers identical (diff).  `LIB_STACK_VER 0x410` is simply how
+  ST build v5.4.1 of this binary.  "Swap in the newer core" is a no-op.
+- **Sink EPR-enter AMS mapped completely** (`usbpd_pe_epr.o`, table
+  `_Generic_AMS_Send_EnterMode_SNK`, 13-byte packed rows):
+  - row0 state `0xa9`: handler `EPRMode_Enter` — calls the **only** app
+    hook in the whole AMS: `cb->GetDataInfo(port, 0x1E /*SNK_PDP_EPR*/,
+    &tmp, &sz)` (cb slot +0x14), packs the 4-byte EPR_Mode data field
+    (PDP byte into bits 16..23, action `ENTER`=1 into bits 24..31) and
+    returns the payload size.
+  - row1/2 states `0xaa/0xab`: handler `EPRMode_EnterAnswer`, wait for the
+    EPR_Mode reply (row timing 490 ms); on action Ack/Succeeded it sets
+    the PE-internal spec-rev-3 bit and the EPR-mode bit (ctx+0x244
+    `0x20000`) and raises PE events 0x70/0x71/0x72.
+  - row3 state `0x00` (any-other/timeout): back to SNK state `0x43`.
+  - `EPR_Mode` is **data-message type 0x0A** (ST `USBPD_DataMsg_TypeDef`),
+    i.e. a small ordinary frame — not an extended/chunked message.  The
+    earlier "EPR extended-message TX / chunked-DMA" theory is refuted; the
+    TX goes through the same PRL machinery as the working SPR Request path.
+- **Callback audit**: the sink AMS touches only `GetDataInfo` (+0x14),
+  which the app implements correctly (4 bytes of `APP_EPR_GetSinkPdpW()`).
+  `cb+0x40` (`RequestDPMWhatToDo`) is called **only** from EPR-source and
+  USB-data paths (`usbpd_pe_epr.o +0x2da` = `EPRMode_SRC_CableDiscovery_ACK`
+  validating an incoming EPR Source_Cap list with `USBPD_ACTION_CHECK_PDO`;
+  `usbpd_pe_usbdata.o`), so 805f586's +0x40 stub cannot have changed
+  sink-enter behaviour.  All 17 callback slots have been non-NULL since
+  cb15e75/805f586, and the last confirmed freeze (508e200-era) already had
+  the VCONN handlers and DMA-stop bounds.  No missing/incorrect app hook
+  remains in the sink EPR path.
+- **No spec-legal alternative entry**: EPR mode entry requires the sink to
+  transmit `EPR_Mode(Enter)` (PD3.1 §6.6.2); sources cannot initiate EPR,
+  and RDO bit 21 alone (EPR Mode Capable) does not enter EPR mode — it only
+  marks capability for a later Enter.  So the closed AMS is the only door.
+- **Cross-vendor / open-source survey** (user directive: research mixing
+  other stacks, "build one yourself" if needed):
+  - TI: USB-PD is delivered as firmware inside TI PD controllers
+    (TPS6598x/9x, UCC PD-C); no portable MCU PD stack exists → not usable
+    on the STM32H7R3 UCPD.
+  - Zephyr usbc: TCPC-oriented, no EPR sink coverage → not usable.
+  - `pdsink/pdsink` (MIT, C++, sink-only PD 3.2 SPR+PPS+EPR, platform-
+    agnostic core, reference on FUSB302B+FreeRTOS, "early stage"): the
+    most realistic **C-family** base; would need a UCPD/H7R3 PHY shim over
+    the project's proven open device layer + no-OS integration + its own
+    bench validation.
+  - `elagil/usbpd` (MIT, Rust/Embassy, PD 3.2 policy engine; working UCPD
+    **EPR example on STM32G431**: SPR → auto EPR entry → 28 V/4 A):
+    the most spec-complete open EPR sink, but adopting it means an
+    Embassy/Rust firmware path on this board (CubeIDE/GNU-C project) — a
+    project-scale rewrite.
+  - Custom C engine on the existing open UCPD device layer (PHY/TX/RX/
+    timers already bench-proven): the "build one yourself" endpoint;
+    PRL+PE-sink (SPR/PPS/EPR) is a multi-thousand-line protocol effort
+    needing staged bench validation.
+  - **Decision gate**: run the decisive real-EPR build below first.  It
+    either delivers EPR or produces the fault PC that localizes the closed-
+    core failure.  Only if the closed core proves unfixable on this silicon
+    does the project pivot to pdsink/elagil/custom per the user's
+    directive.
+
+## 2026-09-03 DECISIVE REAL-EPR BUILD (gates lifted)
+
+The safe-gate refusals (build 9cbbc65) are removed: `app_epr.c` /
+`app_cmd.c` are restored byte-identical to the 805f586-era state, so
+`epr enter` / `epr exit` / `epr caps` again call the genuine
+`USBPD_PE_Request_EPRModeEnter`, `USBPD_PE_Request_EPRModeExit` and
+`USBPD_PE_Send_ExtendeControlMessage(EPR_GETSRCCAPA)`.  Everything else
+that was ever suspected and fixed is still in place: all 17 PE callback
+slots populated (incl. VCONN handlers), bounded DMA-stop, fault capture
+(live `***FAULT` print on USART1 PB6/PB7 @ 921600 + BKPSRAM record),
+countable slow-pulse blink, next-boot `*** PREVIOUS RUN FAULTED` banner,
+and the >B/>E PE-run telemetry marks armed automatically when `epr enter`
+is accepted.  Host gate: 149/149.
+
+Bench procedure (ONE run decides):
+1. Flash, attach the EPR-capable source, reach an explicit SPR contract.
+2. `epr enter`.  Two possible outcomes:
+   - **Works**: `Enter Succeeded`-class status / `epr status` shows EPR,
+     board alive, console responsive → real EPR delivered; then exercise
+     `epr caps`, `epr request`, `epr exit`, `pd`, `status`.
+   - **Freezes** (no console): press RESET, then paste the first ~10 CDC
+     lines of the next boot — expect `*** PREVIOUS RUN FAULTED: <name>
+     PC=0x90xxxxxx` plus the decode command, or a countable PB2 blink
+     code, or nothing (which itself discriminates: hang vs fault).  Also
+     watch USART1 during the freeze for `***FAULT` / `>B` / `>E` marks.
+3. Whatever the outcome, paste the transcript verbatim.
+
+
+
 > **Update 2026-09-03 (source-independent finding):** the freeze is **not** an
 > EPR-charger/VCONN/cable-discovery artifact. It reproduces on **any** source
 > (EPR-capable or plain SPR) the instant the `epr enter` command is sent while
@@ -104,6 +217,12 @@ experiment** below.
 
 
 ## 2026-09-03 RESOLUTION: harmful EPR library calls replaced with safe gates (build 9cbbc65+)
+
+> **SUPERSEDED by the round-4 decisive real-EPR build above** (bench-
+> accepted stop-gap: it proved the freeze needs the queued AMS and kept the
+> board alive, but it is not EPR).  The gates are lifted again in the
+> decisive build; this section is kept as the historical record of the
+> bench-accepted interim.
 
 Decision (per user directive - stop diagnosing, replace the harmful function
 with something simple that must work): the app no longer calls the three
