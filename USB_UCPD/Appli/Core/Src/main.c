@@ -91,11 +91,11 @@ static void Appli_Fail(uint8_t code)
     for (uint8_t i = 0; i < code; i++)
     {
       HAL_GPIO_WritePin(APP_LED_PORT, APP_LED_PIN, GPIO_PIN_SET);
-      for (volatile uint32_t d = 0; d < 400000UL; d++) { __NOP(); }
+      for (volatile uint32_t d = 0; d < 24000000UL; d++) { __NOP(); }
       HAL_GPIO_WritePin(APP_LED_PORT, APP_LED_PIN, GPIO_PIN_RESET);
-      for (volatile uint32_t d = 0; d < 400000UL; d++) { __NOP(); }
+      for (volatile uint32_t d = 0; d < 24000000UL; d++) { __NOP(); }
     }
-    for (volatile uint32_t d = 0; d < 1600000UL; d++) { __NOP(); }
+    for (volatile uint32_t d = 0; d < 120000000UL; d++) { __NOP(); }
   }
 }
 
@@ -317,11 +317,20 @@ void APP_FaultReportBoot(void)
   name = (rec[1] == 2u) ? "HardFault" :
          (rec[1] == 3u) ? "MemManage" :
          (rec[1] == 4u) ? "BusFault"  :
-         (rec[1] == 5u) ? "UsageFault" : "Error_Handler";
+         (rec[1] == 5u) ? "UsageFault" :
+         (rec[1] == 7u) ? "Error_Handler (init fatal)" :
+         (rec[1] == 8u) ? "DPM / init fatal" : "fatal code";
   pc = rec[6];
 
   APP_LOG_Printf("\r\n*** PREVIOUS RUN FAULTED: %s (code %lu)\r\n",
                  name, (unsigned long)rec[1]);
+  if (rec[1] >= 6u)
+  {
+    /* Non-vector fatal record: no PC/exception frame to report. */
+    APP_LOG_Printf("    no PC/exception frame (non-vector fatal path)\r\n");
+    rec[0] = 0u;
+    return;
+  }
   if (pc != 0u)
   {
     APP_LOG_Printf("    PC   = 0x%08lX   LR = 0x%08lX   xPSR = 0x%08lX\r\n",
@@ -374,6 +383,16 @@ void APP_FaultReportBoot(void)
  *  with a visible LED code instead of hanging silently in while(1). */
 void Appli_Fatal(uint8_t code)
 {
+  /* Non-vector fatal (Error_Handler=7, DPM/init fatal=8, ...): leave a
+   * BKPSRAM record too, so the next boot's CDC banner reports which fatal
+   * path ran even if the live trace/console died with it. */
+  volatile uint32_t *rec =
+    (volatile uint32_t *)(APP_FAULT_BKPSRAM_BASE + APP_FAULT_RECORD_OFFSET);
+  rec[0] = APP_FAULT_RECORD_MAGIC;
+  rec[1] = code;
+  rec[2] = 0u; rec[3] = 0u; rec[4] = 0u; rec[5] = 0u;
+  rec[6] = 0u; rec[7] = 0u; rec[8] = 0u;
+  __DSB();
   Appli_Fail(code);
 }
 

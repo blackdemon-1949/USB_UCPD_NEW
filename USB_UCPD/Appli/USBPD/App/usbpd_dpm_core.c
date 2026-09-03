@@ -146,6 +146,20 @@ static void DPM_NoPowerRoleSwap(uint8_t PortNum,
   (void)Status;         /* no power-role swap on this board */
 }
 
+/* cb +0x40 (USBPD_PE_RequestDPMWhatToDo) is only populated under
+ * USBPDCORE_EPR.  The app's table used to stop at IsPowerReady, leaving this
+ * slot NULL; the library calls it unconditionally from its EPR source and
+ * USB-data paths (disassembly: usbpd_pe_epr.o +0x2da, usbpd_pe_usbdata.o
+ * +0xc2/+0x1e4), which would jump to address 0 on any build that reaches
+ * those paths.  This board is a sink-only, non-USB-data device: answer
+ * NOTSUPPORTED so the PE never acts on an action this app cannot honour. */
+static uint32_t DPM_NoWhatToDo(uint8_t PortNum, uint32_t IDAction)
+{
+  (void)PortNum;
+  (void)IDAction;
+  return (uint32_t)USBPD_NOTSUPPORTED;
+}
+
 
 USBPD_StatusTypeDef USBPD_DPM_InitCore(void)
 {
@@ -189,7 +203,8 @@ USBPD_StatusTypeDef USBPD_DPM_InitCore(void)
     USBPD_DPM_PE_VconnPwr,
     USBPD_DPM_EnterErrorRecovery,
     USBPD_DPM_EvaluateDataRoleSwap,
-    USBPD_DPM_IsPowerReady
+    USBPD_DPM_IsPowerReady,
+    DPM_NoWhatToDo
   };
 
   static const USBPD_CAD_Callbacks CAD_cbs =
