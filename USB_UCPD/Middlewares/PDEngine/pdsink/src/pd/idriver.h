@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #include "pd_conf.h"
 
 namespace pd {

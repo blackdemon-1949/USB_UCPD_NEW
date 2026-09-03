@@ -421,4 +421,63 @@ int pdport_epr_auto(int enable)
     return 0;
 }
 
+// ---------------------------------------------------------------------
+// Sink-initiated query / control messages (CLI diagnostics)
+// ---------------------------------------------------------------------
+
+static bool pdport_link_up(void) {
+    return g_started && (g_port.is_attached || pd_tr_vbus_ok());
+}
+
+static bool pdport_contract_up(void) {
+    return pdport_link_up() &&
+        g_port.pe_flags.test(pd::PE_FLAG::HAS_EXPLICIT_CONTRACT);
+}
+
+int pdport_send_ctrl(uint32_t ctrl_msgt)
+{
+    // Get_Source_Cap is legal before the contract is up; the other
+    // sink-initiated control queries need an explicit contract.
+    if (!pdport_link_up()) { return -1; }
+    if (ctrl_msgt != PDPORT_CTRL_GET_SOURCE_CAP && !pdport_contract_up()) {
+        return -1;
+    }
+    g_pe.send_ctrl_msg((pd::PD_CTRL_MSGT::Type)ctrl_msgt);
+    g_port.wakeup();
+    return 0;
+}
+
+int pdport_send_data(uint32_t data_msgt, const uint32_t *dos, uint32_t ndo)
+{
+    if (!pdport_contract_up()) { return -1; }
+    if (ndo == 0u || ndo > 7u || dos == nullptr) { return -1; }
+    // The PRL keeps whatever payload is in tx_emsg when it sets the header
+    // (same pattern the PE uses for EPR_Mode DOs).
+    g_port.tx_emsg.clear();
+    for (uint32_t i = 0; i < ndo; i++) { g_port.tx_emsg.append32(dos[i]); }
+    g_pe.send_data_msg((pd::PD_DATA_MSGT::Type)data_msgt);
+    g_port.wakeup();
+    return 0;
+}
+
+int pdport_send_ext(uint32_t ext_msgt, const uint32_t *dos, uint32_t ndo)
+{
+    if (!pdport_contract_up()) { return -1; }
+    if (ndo > 7u || (ndo > 0u && dos == nullptr)) { return -1; }
+    g_port.tx_emsg.clear();
+    for (uint32_t i = 0; i < ndo; i++) { g_port.tx_emsg.append32(dos[i]); }
+    g_pe.send_ext_msg((pd::PD_EXT_MSGT::Type)ext_msgt);
+    g_port.wakeup();
+    return 0;
+}
+
+int pdport_hard_reset(void)
+{
+    // PE::request_hard_reset() re-checks the contract itself.
+    if (!pdport_contract_up()) { return -1; }
+    g_pe.request_hard_reset();
+    g_port.wakeup();
+    return 0;
+}
+
 } // extern "C"

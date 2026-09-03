@@ -38,13 +38,19 @@ CFG_CFLAGS = {
 
 
 def linked_sources(proj_dir):
-    """External files the CubeIDE project links in (Drivers / Middlewares / ...)."""
+    """External files the CubeIDE project links in (Drivers / Middlewares / ...).
+
+    Handles file links (type 1) and folder links (type 2).  A folder link is a
+    source folder: CubeIDE compiles every .c/.cpp/.s under it, so walk it.
+    (The PDEngine pdsink/port sources arrive this way.)
+    """
     tree = ET.parse(os.path.join(proj_dir, '.project'))
     out = []
     for link in tree.getroot().iter('link'):
         name = link.findtext('name')
+        kind = link.findtext('type')
         loc = link.findtext('locationURI') or link.findtext('location')
-        if loc is None or not name.lower().endswith(('.c', '.s')):
+        if loc is None:
             continue
         m = re.match(r'PARENT-(\d+)-PROJECT_LOC/(.*)', loc)
         assert m, loc
@@ -52,7 +58,15 @@ def linked_sources(proj_dir):
         base = proj_dir
         for _ in range(depth):
             base = os.path.dirname(base)
-        out.append(os.path.normpath(os.path.join(base, m.group(2))))
+        path = os.path.normpath(os.path.join(base, m.group(2)))
+        if kind == '2':
+            if os.path.isdir(path):
+                for root, _, files in os.walk(path):
+                    for f in sorted(files):
+                        if f.lower().endswith(('.c', '.cpp', '.s')):
+                            out.append(os.path.normpath(os.path.join(root, f)))
+        elif name.lower().endswith(('.c', '.cpp', '.s')):
+            out.append(path)
     return out
 
 
@@ -64,7 +78,7 @@ def local_sources(proj_dir, folders):
             continue
         for root, _, files in os.walk(d):
             for f in sorted(files):
-                if f.lower().endswith(('.c', '.s')):
+                if f.lower().endswith(('.c', '.cpp', '.s')):
                     out.append(os.path.normpath(os.path.join(root, f)))
     return sorted(set(out))
 
@@ -112,6 +126,41 @@ def resolve(base, path):
     return os.path.normpath(os.path.join(base, p))
 
 
+def source_exclusions(proj_dir, config):
+    """Absolute paths (or directory prefixes) excluded from the build.
+
+    The .cproject source entries carry an `excluding` attribute whose
+    patterns are relative to the source folder (e.g. the USBPD folder
+    excludes App/usbpd_dpm_core.c).  CubeIDE skips those files; so must we.
+    """
+    tree = ET.parse(os.path.join(proj_dir, '.cproject'))
+    out = []
+    for cfg in tree.getroot().iter('configuration'):
+        if cfg.get('name') != config:
+            continue
+        for se in cfg.iter('sourceEntries'):
+            for entry in se.iter('entry'):
+                folder = entry.get('name')
+                excl = entry.get('excluding')
+                if not folder or not excl:
+                    continue
+                for pat in excl.split('|'):
+                    pat = pat.strip()
+                    if pat:
+                        out.append(os.path.normpath(
+                            os.path.join(proj_dir, folder, pat)))
+    return out
+
+
+def is_excluded(src, exclusions):
+    a = os.path.abspath(src)
+    for e in exclusions:
+        e = os.path.abspath(e)
+        if a == e or a.startswith(e + os.sep):
+            return True
+    return False
+
+
 def build(proj, config, jobs):
     proj_dir = os.path.join(ROOT, 'USB_UCPD', proj)
     defines, includes, folders, libs, ldscript = cproject_options(proj_dir, config)
@@ -122,6 +171,8 @@ def build(proj, config, jobs):
 
     sources = local_sources(proj_dir, [f.strip() for f in folders]) + \
               linked_sources(proj_dir)
+    exclusions = source_exclusions(proj_dir, config)
+    sources = [s for s in sources if not is_excluded(s, exclusions)]
     sources = sorted(set(os.path.abspath(s) for s in sources))
 
     # CubeIDE writes include/lib paths relative to the *build* directory
@@ -152,6 +203,10 @@ def build(proj, config, jobs):
     for o in obj_map.values():
         assert o.startswith(outdir + os.sep), 'object escapes the build dir: %s' % o
 
+    # CubeIDE compiles .cpp with the C++ tool.  Its "Standard" option is left
+    # at the STM32CubeIDE default, which is gnu++14 (the PDEngine host gates
+    # use gnu++17; both work, see pdsink/src/pd/timers.cpp).
+    cpp_flags = ['-std=gnu++14']
     tasks = []
     for s in sources:
         obj = obj_map[s]
@@ -160,6 +215,9 @@ def build(proj, config, jobs):
         if s.lower().endswith('.s'):
             cmd = ['arm-none-eabi-gcc'] + MCUFLAGS + def_flags + inc_flags + \
                   ['-c', s, '-o', obj]
+        elif s.lower().endswith('.cpp'):
+            cmd = ['arm-none-eabi-g++'] + cflags + cpp_flags + \
+                  ['-MMD', '-MP', '-MF', dep, '-c', s, '-o', obj]
         else:
             cmd = ['arm-none-eabi-gcc'] + cflags + \
                   ['-MMD', '-MP', '-MF', dep, '-c', s, '-o', obj]
@@ -185,13 +243,20 @@ def build(proj, config, jobs):
     objs = [obj_map[s] for s in sources]
     elf = os.path.join(outdir, '%s_%s.elf' % (proj, config))
     ld = os.path.join(proj_dir, ldscript)
-    link = ['arm-none-eabi-gcc', '-o', elf] + objs
+    has_cpp = any(s.lower().endswith('.cpp') for s in sources)
+    # With C++ in the mix CubeIDE links with g++ and pulls in libstdc++
+    # (and libsupc++ for exception unwinding), as shown in the IDE log.
+    if has_cpp:
+        link = ['arm-none-eabi-g++', '-o', elf] + objs + ['-lstdc++']
+    else:
+        link = ['arm-none-eabi-gcc', '-o', elf] + objs
     for l in libs:
         link.append(resolve(outdir, l))
+    group = ['-lc', '-lm'] + (['-lstdc++', '-lsupc++'] if has_cpp else [])
     link += MCUFLAGS + ['-T' + ld,
                         '-Wl,-Map=%s.map,--gc-sections' % os.path.splitext(elf)[0],
                         '-static', '--specs=nano.specs', '--specs=nosys.specs',
-                        '-Wl,--start-group', '-lc', '-lm', '-Wl,--end-group']
+                        '-Wl,--start-group'] + group + ['-Wl,--end-group']
     res = subprocess.run(link, capture_output=True, text=True)
     if res.returncode != 0:
         sys.stderr.write('LINK FAILED\n%s\n' % res.stderr)

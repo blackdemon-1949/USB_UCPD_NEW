@@ -64,6 +64,13 @@ public:
     void send_data_msg(PD_DATA_MSGT::Type msgt);
     void send_ext_msg(PD_EXT_MSGT::Type msgt);
 
+    // Project-local addition: sink-initiated hard reset (CLI "hardreset").
+    // Reuses the engine's own recovery path (PE_SNK_Hard_Reset), which runs
+    // the burst through PRL and then transitions to default so the partner
+    // re-negotiates.  Per the spec a sink may only do this within an
+    // explicit contract, so the call is a no-op without one.
+    void request_hard_reset();
+
     bool is_in_epr_mode() const;
     bool is_in_spr_contract() const;
     bool is_in_pps_contract() const;

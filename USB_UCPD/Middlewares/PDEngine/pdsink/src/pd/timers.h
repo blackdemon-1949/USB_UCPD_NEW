@@ -1,6 +1,7 @@
 #pragma once
 
 #include "pd_conf.h"
+#include "idriver.h" // ITimer::TimeFunc used by Timers
 #include "utils/timer_pack.h"
 
 namespace pd {

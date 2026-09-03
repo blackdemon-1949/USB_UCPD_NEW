@@ -201,6 +201,55 @@ int pdport_epr_exit(void);
  * future entries; an active EPR contract is left untouched. */
 int pdport_epr_auto(int enable);
 
+/* ------------------------------------------------------------------ */
+/* Sink-initiated query / control messages (CLI diagnostics)          */
+/*                                                                     */
+/* The message-type values are the pdsink PD_CTRL_MSGT / PD_DATA_MSGT */
+/* / PD_EXT_MSGT numeric codes (USB PD spec tables 6.4-6.53).  The    */
+/* PRL adds the 2-byte extended header for the PDPORT_EXT_* kinds.    */
+/*                                                                     */
+/* All functions return 0 when the message was queued and -1 when     */
+/* refused (no link, or no explicit contract where the spec requires  */
+/* one).  Like the request engine above, "queued" is never "done":    */
+/* the reply arrives as an ordinary PD message and is visible on the  */
+/* trace; the state machine has no further action on it.              */
+/* ------------------------------------------------------------------ */
+
+#define PDPORT_CTRL_GET_SOURCE_CAP      7u /* ctrl Get_Source_Cap    */
+#define PDPORT_CTRL_SOFT_RESET         13u /* ctrl Soft_Reset        */
+#define PDPORT_CTRL_GET_SOURCE_CAP_EXT 17u /* ctrl Get_Source_Cap_Ext*/
+#define PDPORT_CTRL_GET_STATUS         18u /* ctrl Get_Status        */
+#define PDPORT_CTRL_GET_PPS_STATUS     20u /* ctrl Get_PPS_Status    */
+#define PDPORT_CTRL_GET_COUNTRY_CODES  21u /* ctrl Get_Country_Codes */
+#define PDPORT_DATA_GET_COUNTRY_INFO    7u /* data Get_Country_Info  */
+#define PDPORT_EXT_GET_BATTERY_CAP      3u /* ext  Get_Battery_Cap   */
+#define PDPORT_EXT_GET_BATTERY_STATUS   4u /* ext  Get_Battery_Status*/
+#define PDPORT_EXT_GET_MANUFACTURER_INFO 6u /* ext Get_Manufacturer_Info */
+
+/*
+ * Sink-initiated control message (no data objects).
+ */
+int pdport_send_ctrl(uint32_t ctrl_msgt);
+
+/*
+ * Sink-initiated data message carrying `ndo` 32-bit data objects
+ * (1..7; the header carries a 3-bit object count).
+ */
+int pdport_send_data(uint32_t data_msgt, const uint32_t *dos, uint32_t ndo);
+
+/*
+ * Sink-initiated extended message carrying `ndo` 32-bit data objects
+ * (0..7; the PRL prepends the 2-byte extended header).
+ */
+int pdport_send_ext(uint32_t ext_msgt, const uint32_t *dos, uint32_t ndo);
+
+/*
+ * Sink-initiated hard reset.  Only allowed within an explicit contract
+ * (spec 6.6.17); returns -1 otherwise.  Runs the engine's own recovery
+ * path, so the partner re-negotiates afterwards.
+ */
+int pdport_hard_reset(void);
+
 #ifdef __cplusplus
 }
 #endif

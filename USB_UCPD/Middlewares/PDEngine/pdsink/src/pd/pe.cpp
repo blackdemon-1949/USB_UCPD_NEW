@@ -537,6 +537,20 @@ public:
                     }
                     return sr_on_unsupported ? PE_SNK_Send_Soft_Reset : PE_SNK_Send_Not_Supported;
 
+                // Replies to sink-initiated queries (the CLI getstatus /
+                // getpps / srcext / countrycodes / countryinfo / manuinfo /
+                // battery commands).  The application reads them on the
+                // trace; the state machine has no action to take.
+                case PD_EXT_MSGT::Status:
+                case PD_EXT_MSGT::PPS_Status:
+                case PD_EXT_MSGT::Source_Capabilities_Extended:
+                case PD_EXT_MSGT::Country_Codes:
+                case PD_EXT_MSGT::Country_Info:
+                case PD_EXT_MSGT::Battery_Capabilities:
+                case PD_EXT_MSGT::Manufacturer_Info:
+                    PE_LOGI("Got query reply (ext type {}), nothing to do", hdr.message_type);
+                    break;
+
                 default:
                     PE_LOGE("Unexpected PD_EXT_MSGT: {}", hdr.message_type);
                     return sr_on_unsupported ? PE_SNK_Send_Soft_Reset : PE_SNK_Send_Not_Supported;
@@ -576,6 +590,12 @@ public:
                     PE_LOGE("Unsupported PD_DATA_MSGT::EPR_Mode Action: {}", eprmdo.action);
                     return sr_on_unsupported ? PE_SNK_Send_Soft_Reset : PE_SNK_Send_Not_Supported;
                 }
+
+                // Reply to a sink-initiated Get_Battery_Status query (the
+                // CLI battery command).  No action to take.
+                case PD_DATA_MSGT::Battery_Status:
+                    PE_LOGI("Got Battery_Status (query reply), nothing to do");
+                    break;
 
                 default:
                     PE_LOGE("Unexpected PD_DATA_MSGT: {}", hdr.message_type);
@@ -1515,6 +1535,12 @@ void PE::send_ext_msg(PD_EXT_MSGT::Type msgt) {
 void PE::send_ctrl_msg(PD_CTRL_MSGT::Type msgt) {
     port.pe_flags.clear(PE_FLAG::TX_COMPLETE);
     port.notify_prl(MsgToPrl_CtlMsgFromPe{msgt});
+}
+
+void PE::request_hard_reset() {
+    if (port.pe_flags.test(PE_FLAG::HAS_EXPLICIT_CONTRACT)) {
+        change_state(PE_SNK_Hard_Reset);
+    }
 }
 
 //
