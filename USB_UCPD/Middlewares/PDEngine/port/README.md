@@ -36,88 +36,45 @@ include paths listed in `Appli/.cproject`).  `UCPD1_IRQHandler` in
 (open `usbpd_hw_if_it.c`), which now dispatches into the `pd_tr_st.c`
 callbacks through `Ports[0].cbs`.
 
-## CubeIDE wiring steps (single port, Debug/Release both)
+## CubeIDE wiring (already done in-tree)
 
-0. **Define `PDENGINE_PDSINK` project-wide** (Project → Properties → C/C++
-   Build → Settings → MCU GCC Compiler → Preprocessor, add
-   `PDENGINE_PDSINK`; it selects the in-tree `#if defined(PDENGINE_PDSINK)`
-   branches in the app/glue files listed under step 4).  Without this
-   define the build is byte-identical to the closed-core path.
+`Appli/.cproject` and `Appli/.project` (Debug **and** Release) are wired
+for the pdsink profile, so no manual CubeIDE steps remain:
 
-1. **Compile pdsink + port sources** (C++17 — add `-std=gnu++17` to the
-   C++ compiler options if not already set):
+- Project-wide `PDENGINE_PDSINK` is defined for the C and C++ compilers
+  (and mirrored in the CubeMX defaults strings), selecting the in-tree
+  `#if defined(PDENGINE_PDSINK)` branches.  Without the define the build
+  is the byte-identical closed-core path.
+- The C++ toolchain is enabled (`org.eclipse.cdt.core.ccnature` in
+  `Appli/.project`) and the two G++ tools carry the same defines,
+  include paths and linker script as the GCC tools.  The pdsink sources
+  are linked into the project as `Middlewares/PDEngine/pdsink/src` and
+  `Middlewares/PDEngine/port/src` (both inside the existing
+  `Middlewares` source entry) and compile as C++17 (the GNU Arm 14.3.1
+  default standard; the host gates pin `-std=gnu++17`).
+- The closed-core archive `USBPDCORE_PD3_FULL_CM7_wc32.a` and its
+  `Middlewares/ST/STM32_USBPD_Library/Core/lib` search path are removed
+  from both configurations; the C link line carries `-lstdc++` instead,
+  because the pdsink C++ objects are linked by the (C) GCC linker.
+  A symbol audit against the archive showed no compiled C file needs
+  it, so dropping the `.a` is safe for the pdsink profile.
+- `Appli/USBPD/App/usbpd_dpm_core.c` and
+  `Appli/USBPD/Target/usbpd_dpm_user.c` are excluded from both
+  configurations (`excluding=` on the `USBPD` source entry).  Their
+  closed-core exports are replaced by the pdsink init + 1 ms pump and by
+  the seam event callback registered in `APP_PD_Init()`.
 
-   - `Middlewares/PDEngine/pdsink/src/pd/*.cpp`
-   - `Middlewares/PDEngine/pdsink/src/pd/utils/*.cpp`
-   - `Middlewares/PDEngine/port/src/pd_ucpd_driver.cpp`
-   - `Middlewares/PDEngine/port/src/pdport_app.cpp` (board glue, see below)
+So the whole procedure is: import `USB_UCPD` into STM32CubeIDE, build
+`USB_UCPD_Appli` **Debug**, flash (see `USB_UCPD/FLASHING.md`).  Nothing
+else.
 
-   Include paths to add:
-   - `Middlewares/PDEngine/etl/include`
-   - `Middlewares/PDEngine/pdsink/src`
-   - `Middlewares/PDEngine/pdsink/include`
-   - `Middlewares/PDEngine/port/include/pdport`
-
-2. **Compile the transport** `Middlewares/PDEngine/port/src/pd_tr_st.c`
-   as C.  It needs no new include paths beyond the ones already in the
-   project (it includes `usbpd_devices_conf.h`, `usbpd_core.h`,
-   `usbpd_phy.h`, `usbpd_hw_if.h`, `usbpd_cad_hw_if.h`).
-
-3. **Remove the closed core from the link**: delete the
-   `.../Core/lib/USBPDCORE_PD3_FULL_CM7_wc32.a` entry from
-   `Appli/.cproject` (or uncheck it in Project → Properties → C/C++
-   Build → Settings → MCU GCC Linker → Libraries, and remove the
-   `Middlewares/ST/STM32_USBPD_Library/Core/lib` include path).
-
-4. **Exclude the closed-core DPM/PE user glue from the build**
-   (right-click → Resource Configurations → Exclude from build):
-
-   - `Appli/USBPD/App/usbpd_dpm_core.c` (its exports — `USBPD_DPM_InitCore/
-     InitOS/Run/TimerCounter`, `USBPD_TRACE_Init()` caller — are replaced
-     by the pdsink init + 1 ms pump; keep the file excluded from now on).
-   - `Appli/USBPD/Target/usbpd_dpm_user.c` (closed-core DPM user
-     callbacks; each body calls into the closed PE/CAD library
-     — `USBPD_PE_Request_HardReset`, `USBPD_CAD_EnterErrorRecovery`,
-     SVDM requests, … — so it cannot link once the `.a` is gone.  Its app
-     hooks are replaced on the pdsink path by the seam event callback
-     registered in `APP_PD_Init()`, which the pdsink branch of
-     `MX_USBPD_Init()` now calls explicitly).
-
-   `Appli/USBPD/App/usbpd.c` **stays compiled**: its `MX_USBPD_Init()` has
-   an in-tree pdsink branch (`pdport_init()` with `Appli_Fatal(8)` on
-   failure).  Everything else in `Appli/USBPD/Target/*` and every
-   `Appli/Core/Src/*.c` module is closed-core-free on the pdsink profile
-   (verified by a symbol audit against the `.a`); the only closed-core
-   registration left in the open ST layer is one line in
-   `Core/src/usbpd_trace.c` (`USBPD_PE_SetTrace`, see the documented
-   `#if !defined(PDENGINE_PDSINK)` seam guard there).
-
-   **M4-app status**: complete and committed.  The app call sites are
-   re-pointed onto the seam and guarded with `#if defined(PDENGINE_PDSINK)`
-   (default OFF — closed path unchanged): `app_epr.c` EPR verbs/status
-   read the seam snapshot and queue real pdsink requests (`epr enter`
-   reports queued, never fabricated); `app_pd.c` request engine routes
-   `req`/`pps`/`auto`/`sweep` through `pdport_*`; `app_vdm_target.c` /
-   `app_cable_target.c` reject/register-nothing truthfully (the pdsink PE
-   has no SVDM client — VDM/cable discovery stays "n/a" on a pdsink
-   build); `app_pdcap.c` capture registration is compiled out; `main.c`
-   pumps `pdport_service()`; `usbpd.c` inits the seam (see step 5).
-
-5. **Init (one-time, before the main loop)**: done in-tree and guarded —
-   the pdsink branch of `MX_USBPD_Init()` (`Appli/USBPD/App/usbpd.c`)
-   calls `APP_PD_Init()` (arms the seam event callback) then
-   `pdport_init()` (`pd_tr_st.c` transport init + pdsink `Task::start`),
-   and fails with `Appli_Fatal(8)` if the transport init fails.
-   `main.c` calls `MX_USBPD_Init()` before the loop as today; no manual
-   externs needed.
-
-6. **Main loop**: done in-tree and guarded — `main.c` `while (1)` calls
-   `pdport_service()` instead of `USBPD_DPM_Run()` when
-   `PDENGINE_PDSINK` is defined.  The pump keeps its own 1 ms cadence
-   from `HAL_GetTick()` and must be called regularly (every loop pass is
-   fine — it self-throttles), like the old `USBPD_DPM_Run()` slice.
-   Everything else in the loop (`APP_PD_Task`, CLI, INA226, LED…) stays
-   untouched.
+**Closed-core fallback** (restore the original ST stack, e.g. to
+compare or to bench): revert the wiring commit with `git log --oneline
+-- USB_UCPD/Appli/.cproject`, or undo the four edits above (remove the
+define/includes, re-add the archive + `Core/lib` path, un-exclude the
+two files, drop the C++ nature/links).  `usbpd_dpm_core.c`,
+`usbpd_dpm_user.c` and the archive are untouched in git, so the closed
+profile rebuilds byte-identical.
 
 ## Board glue — `port/src/pdport_app.cpp` (committed, host-benched)
 
@@ -215,7 +172,7 @@ toolchain:
 
 Milestones: M1 = vendored pdsink core + engine host gate (green), M2 =
 UCPD driver + gate (green), M3 = full-stack SPR bench (green), M4 =
-ST transport (green) + CubeIDE wiring (this guide) + app glue
+ST transport (green) + CubeIDE wiring (in-tree `.cproject`/`.project`) + app glue
 (`pdport_app`, green on the host gate; the per-command app re-pointing
 table is above), M5 = EPR bench (host: green — see the 4 EPR tests) +
 board bench (pending, live hardware) + flash-safety summary

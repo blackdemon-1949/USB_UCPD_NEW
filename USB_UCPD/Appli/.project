@@ -21,6 +21,7 @@
 	<natures>
 		<nature>com.st.stm32cube.ide.mcu.MCUProjectNature</nature>
 		<nature>org.eclipse.cdt.core.cnature</nature>
+		<nature>org.eclipse.cdt.core.ccnature</nature>
 		<nature>com.st.stm32cube.ide.mcu.MCUCubeIdeServicesRevAev2ProjectNature</nature>
 		<nature>com.st.stm32cube.ide.mcu.MCUCubeProjectNature</nature>
 		<nature>com.st.stm32cube.ide.mcu.MCUAdvancedStructureProjectNature</nature>
@@ -282,6 +283,16 @@
 			<name>Middlewares/ST/STM32_USB_Device_Library/usbd_ioreq.c</name>
 			<type>1</type>
 			<locationURI>PARENT-1-PROJECT_LOC/Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_ioreq.c</locationURI>
+		</link>
+		<link>
+			<name>Middlewares/PDEngine/pdsink/src</name>
+			<type>2</type>
+			<locationURI>PARENT-1-PROJECT_LOC/Middlewares/PDEngine/pdsink/src</locationURI>
+		</link>
+		<link>
+			<name>Middlewares/PDEngine/port/src</name>
+			<type>2</type>
+			<locationURI>PARENT-1-PROJECT_LOC/Middlewares/PDEngine/port/src</locationURI>
 		</link>
 	</linkedResources>
 </projectDescription>

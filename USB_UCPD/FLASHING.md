@@ -15,6 +15,13 @@ Both Debug configurations already point at:
 - Boot → `STM32H7R3Z8JX_FLASH.ld` (`0x08000000`, 64 KB)
 - Appli → `STM32H7R3Z8JX_ROMxspi1.ld` (`0x90000000`, 8 MB)
 
+The `Appli` Debug configuration is pre-wired in the repo for the open
+pdsink PD3.x profile (define, pdsink sources, C++ link, closed-core
+`.a` removal and file exclusions are already in `.cproject`/`.project`
+— see `Middlewares/PDEngine/port/README.md`).  No project-settings
+steps between download and build.
+
+
 ## 2. Install the WeAct NOR loader
 
 In STM32CubeProgrammer:

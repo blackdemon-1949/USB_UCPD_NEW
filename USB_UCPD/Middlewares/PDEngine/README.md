@@ -106,5 +106,5 @@ Target build notes (CubeIDE 2.2.0 / GNU ARM 14.3.1): add
 The vendored `pdsink/src/pd/pd_conf.h` holds the default settings and is
 included automatically — no external `pd_config.h` or
 `PD_USE_CONFIG_FILE` define is required (define one only to override
-settings).  Preprocessor: add `PDENGINE_PDSINK` project-wide (see
-`port/README.md` step 0).
+settings).  `PDENGINE_PDSINK` is already defined project-wide in the
+wired `Appli/.cproject`/`.project` (see `port/README.md`).
