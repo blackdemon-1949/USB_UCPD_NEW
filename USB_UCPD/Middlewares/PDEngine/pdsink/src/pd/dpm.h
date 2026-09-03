@@ -72,6 +72,12 @@ public:
     // clamped to profile limits (position has priority over the rest).
     void trigger_by_position(uint8_t position, uint32_t mv=0, uint32_t ma = 0);
 
+    // Project-local addition: request a sink-initiated EPR mode exit.
+    // Per PD 3.1 the Sink must already hold an SPR-level contract (see
+    // DPM_REQUEST_FLAG::EPR_MODE_EXIT), i.e. first trigger an SPR PDO and
+    // wait for the contract change to complete.  No-op when not in EPR mode.
+    void request_epr_exit();
+
 protected:
     Port& port;
 

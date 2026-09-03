@@ -41,8 +41,13 @@ enum PE_State {
     // [rev3.2] 8.3.3.26.2 Sink EPR Mode Entry State Diagram
     PE_SNK_Send_EPR_Mode_Entry,
     PE_SNK_EPR_Mode_Entry_Wait_For_Response,
+    // Project-local addition: sink-initiated EPR mode exit (see
+    // DPM_REQUEST_FLAG::EPR_MODE_EXIT).  Sends EPR_Mode(Exit) after the
+    // sink holds an SPR-level contract, then waits for the SPR
+    // Source_Capabilities the Source sends in reply (tFirstSourceCap).
+    PE_SNK_EPR_Mode_Exit_Send,
     // [rev3.2] 8.3.3.26.4 Sink EPR Mode Exit State Diagram
-    PE_SNK_EPR_Mode_Exit_Received, // Manual exit not needed, only SRC-forced
+    PE_SNK_EPR_Mode_Exit_Received, // SRC-forced exit (upstream behaviour)
 
     // [rev3.2] 8.3.3.27 BIST State Diagrams
     PE_BIST_Activate, // Not in spec, common entry point
@@ -77,6 +82,7 @@ namespace {
             case PE_SNK_Send_EPR_Mode_Entry: return "PE_SNK_Send_EPR_Mode_Entry";
             case PE_SNK_EPR_Mode_Entry_Wait_For_Response: return "PE_SNK_EPR_Mode_Entry_Wait_For_Response";
             case PE_SNK_EPR_Mode_Exit_Received: return "PE_SNK_EPR_Mode_Exit_Received";
+            case PE_SNK_EPR_Mode_Exit_Send: return "PE_SNK_EPR_Mode_Exit_Send";
             case PE_BIST_Activate: return "PE_BIST_Activate";
             case PE_BIST_Carrier_Mode: return "PE_BIST_Carrier_Mode";
             case PE_BIST_Test_Mode: return "PE_BIST_Test_Mode";
@@ -657,6 +663,25 @@ public:
 
             port.pe_flags.set(PE_FLAG::AMS_ACTIVE);
 
+            // Project-local addition: sink-initiated EPR mode exit.  Handled
+            // before EPR_MODE_ENTRY so an armed entry request cannot race an
+            // exit.  Per PD 3.1 the Sink must hold an SPR-level contract
+            // before sending EPR_Mode(Exit); the application performs that
+            // step first (EPR_Request for an SPR PDO via NEW_POWER_LEVEL).
+            if (port.dpm_requests.test(DPM_REQUEST_FLAG::EPR_MODE_EXIT)) {
+                if (!pe.is_in_epr_mode()) {
+                    PE_LOGI("EPR mode exit requested, but not in EPR mode");
+                    port.dpm_requests.clear(DPM_REQUEST_FLAG::EPR_MODE_EXIT);
+                } else if (!pe.is_in_spr_contract()) {
+                    PE_LOGE("EPR mode exit requested, but no SPR-level contract yet; "
+                            "request an SPR PDO first (NEW_POWER_LEVEL)");
+                    port.dpm_requests.clear(DPM_REQUEST_FLAG::EPR_MODE_EXIT);
+                } else {
+                    pe.active_dpm_request = DPM_REQUEST_FLAG::EPR_MODE_EXIT;
+                    return PE_SNK_EPR_Mode_Exit_Send;
+                }
+            }
+
             if (port.dpm_requests.test(DPM_REQUEST_FLAG::EPR_MODE_ENTRY)) {
                 if (pe.is_in_epr_mode()) {
                     PE_LOGI("EPR mode entry requested, but already in EPR mode");
@@ -1131,6 +1156,88 @@ public:
 };
 
 
+// Project-local addition: sink-initiated EPR mode exit.
+//
+// PD 3.1 "Exiting EPR Mode": once the Sink holds an SPR-level contract
+// (EPR_Request for a PDO position <= 7, voltage <= 20 V), it sends
+// EPR_Mode(Exit).  The Source treats that as the EPR-mode hand-over and
+// replies with plain SPR Source_Capabilities within tFirstSourceCap; the
+// Sink re-establishes the SPR contract.  The mode flags are cleared the
+// same way the SRC-forced path (PE_SNK_EPR_Mode_Exit_Received) does, so
+// afterwards the Sink does not attempt to auto-enter EPR mode again.
+class PE_SNK_EPR_Mode_Exit_Send_State
+    : public afsm::state<PE, PE_SNK_EPR_Mode_Exit_Send_State, PE_SNK_EPR_Mode_Exit_Send>,
+      public afsm::interceptor_pack<InterceptorCheckRequestProgress, InterceptorForwardErrors>
+{
+public:
+    static auto on_enter_state(PE& pe) -> state_id_t {
+        auto& port = pe.port;
+        pe.log_state();
+
+        EPRMDO eprmdo{};
+        eprmdo.action = EPR_MODE_ACTION::EXIT;
+
+        port.tx_emsg.clear();
+        port.tx_emsg.append32(eprmdo.raw_value);
+
+        pe.send_data_msg(PD_DATA_MSGT::EPR_Mode);
+
+        // Watchdog for the transmission (same timer the entry path uses).
+        port.timers.start(PD_TIMEOUT::tEnterEPR);
+
+        return No_State_Change;
+    }
+
+    static auto on_run_state(PE& pe) -> state_id_t {
+        auto& port = pe.port;
+
+        // Our EXIT was interrupted by an incoming message.  Go back to Ready
+        // with the request still armed: PE_SNK_Ready will retry it once the
+        // incoming activity is absorbed.
+        if (pe.request_progress == PE_REQUEST_PROGRESS::DISCARDED) {
+            return PE_SNK_Ready;
+        }
+
+        if ((pe.request_progress == PE_REQUEST_PROGRESS::FAILED) ||
+            port.pe_flags.test_and_clear(PE_FLAG::PROTOCOL_ERROR))
+        {
+            PE_LOGE("EPR mode exit send failed => Soft Reset");
+            return PE_SNK_Send_Soft_Reset;
+        }
+
+        // NOTE: InterceptorCheckRequestProgress consumes PE_FLAG::TX_COMPLETE
+        // and reports the transmission result through `request_progress`
+        // (FINISHED once the frame is on the wire and acknowledged).
+        if (pe.request_progress == PE_REQUEST_PROGRESS::FINISHED) {
+            // Spec guard (mirrors the SRC-forced exit path): EPR mode may be
+            // left only from an SPR-level contract.
+            if (!pe.is_in_spr_contract()) {
+                PE_LOGE("EPR mode exit: not in an SPR contract => Hard Reset");
+                return PE_SNK_Hard_Reset;
+            }
+
+            port.pe_flags.clear(PE_FLAG::IN_EPR_MODE);
+            port.pe_flags.set(PE_FLAG::EPR_AUTO_ENTER_DISABLED);
+            port.dpm_requests.clear(DPM_REQUEST_FLAG::EPR_MODE_EXIT);
+
+            // The Source answers EPR_Mode(Exit) with SPR Source_Capabilities.
+            return PE_SNK_Wait_for_Capabilities;
+        }
+
+        if (port.timers.is_expired(PD_TIMEOUT::tEnterEPR)) {
+            PE_LOGE("EPR mode exit timeout => Soft Reset");
+            return PE_SNK_Send_Soft_Reset;
+        }
+
+        return No_State_Change;
+    }
+
+    static void on_exit_state(PE& pe) {
+        pe.port.timers.stop(PD_TIMEOUT::tEnterEPR);
+    }
+};
+
+
 class PE_SNK_EPR_Mode_Exit_Received_State : public afsm::state<PE, PE_SNK_EPR_Mode_Exit_Received_State, PE_SNK_EPR_Mode_Exit_Received> {
 public:
     static auto on_enter_state(PE& pe) -> state_id_t {
@@ -1314,6 +1421,7 @@ using PE_STATES = afsm::state_pack<
     PE_SNK_Source_Alert_Received_State,
     PE_SNK_Send_EPR_Mode_Entry_State,
     PE_SNK_EPR_Mode_Entry_Wait_For_Response_State,
+    PE_SNK_EPR_Mode_Exit_Send_State,
     PE_SNK_EPR_Mode_Exit_Received_State,
     PE_BIST_Activate_State,
     PE_BIST_Carrier_Mode_State,

@@ -7,6 +7,13 @@ enum class DPM_REQUEST_FLAG {
     NONE, // Skip 0 to simplify active request checks
     NEW_POWER_LEVEL,
     EPR_MODE_ENTRY,
+    // Project-local addition (upstream pdsink: "Manual exit not needed, only
+    // SRC-forced"): sink-initiated EPR mode exit.  Per PD 3.1 the exit is a
+    // two-step procedure: the Sink must first hold an SPR-level contract
+    // (EPR_Request for a PDO position <= 7), then sends EPR_Mode(Exit); the
+    // Source answers with SPR Source_Capabilities (tFirstSourceCap) and the
+    // contract is re-established in SPR mode.
+    EPR_MODE_EXIT,
 
     _Count
 };

@@ -170,7 +170,12 @@ auto DPM::get_request_data_object(const etl::ivector<uint32_t>& src_caps) -> etl
         uint32_t mv = trigger_mv ? trigger_mv : limits.mv_min;
         mv = etl::clamp<uint32_t>(mv, limits.mv_min, limits.mv_max);
 
-        uint32_t ma_limit = limits.ma ? limits.ma : (limits.pdp * 1000U / mv);
+        // Project-local units fix for EPR AVS: `pdp` is in watts and `mv`
+        // in millivolts, so I = P/U is (pdp * 1e6) / mv in milliamps.
+        // (Upstream used pdp * 1000 / mv, which yields milliamps only if
+        // pdp were in milliwatts - the default DPM then requested ~5 mA
+        // instead of 5 A from AVS sources.)
+        uint32_t ma_limit = limits.ma ? limits.ma : (limits.pdp * 1000000U / mv);
         if (ma_limit > 5000) { ma_limit = 5000; } // clamp to 5A max PD limit
 
         uint32_t ma = trigger_ma ? trigger_ma : ma_limit;
@@ -218,6 +223,12 @@ void DPM::request_new_power_level() {
         port.dpm_requests.set(DPM_REQUEST_FLAG::NEW_POWER_LEVEL);
         // Don't call wakeup(); keep execution in the driver's "thread".
         // Rely on the timer's periodic tick to catch the request.
+    }
+}
+
+void DPM::request_epr_exit() {
+    if (port.pe_flags.test(PE_FLAG::IN_EPR_MODE)) {
+        port.dpm_requests.set(DPM_REQUEST_FLAG::EPR_MODE_EXIT);
     }
 }
 
