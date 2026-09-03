@@ -138,15 +138,17 @@ Notes:
   It delivers the pdsink timer tick, drains the RX ring into the PRL on
   the stack's schedule, resolves deferred GoodCRC replies, watches TX
   timeouts and forwards latched IRQ events.  All of that is the same
-  code the host benches (M2/M3) exercise.
+  code the host benches (M2/M3/M4-app/M5) exercise.
 - CC scanning is done by pdsink's TC through `pd_tr_read_cc()`
   (comparator band read); the Type-C event interrupt
   (`TR_CcWakeUp` → `pd_drv_on_cc_event`) only makes the poll happen
   sooner.  No CAD state machine runs.
 - DPM triggers (which PDO to request, PPS set-point changes, EPR mode
-  entry) come from the application modules.  The default `pd::DPM`
-  provides `trigger_any()/trigger_by_position()/trigger_variant()`; the
-  CLI/PPS/EPR app re-wiring uses those (M4-app/M5 work items).
+  entry) come from the application modules through the `pdport_app.h`
+  seam.  The pdsink DPM provides the underlying
+  `trigger_any()/trigger_by_position()/trigger_variant()` sugar plus the
+  project-local `request_epr_entry()/request_epr_exit()/
+  enable_auto_epr_entry()` EPR controls (host-benched).
 
 ## Transport behaviour summary (pd_tr_st.c)
 
