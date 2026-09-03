@@ -139,16 +139,31 @@ Milestones (each bench-gated; no claim without a live board):
    20.43.0 vendored under `USB_UCPD/Middlewares/PDEngine`; the six upstream
    googletest suites run green from the repo tree via
    `tools/pdengine_hosttest/run.sh` (79 tests).
-2. **UCPD driver** (`drivers/ucpd_stm32h7r3`): CC detect/polarity,
-   TX/RX via the proven GPDMA1 CH0/CH1 path, SOP filtering, GoodCRC
-   hooks; modelled on the open ST device layer, keeping the DMA map.
-3. **SPR bench milestone**: attach + Source_Cap + Request + explicit
-   contract + PPS, with the ST core absent from the link.
-4. **Feature parity**: VDM/cable identity, existing CLI/status/EPR app
-   tables re-pointed at the new engine.
-5. **EPR bench milestone**: `EPR_Mode(Enter)` via pdsink's PE, AVS
-   request, exit — the acceptance bar (Enter Succeeded + board alive)
-   applies unchanged.
+2. **UCPD driver**: ✅ DONE (host-green). Self-written `pd::IDriver`
+   (`port/pd_ucpd_driver.cpp`, 15 tests in `tools/pdport_hosttest`) over
+   the `port/pd_tr.h` transport contract; the STM32H7RS binding is
+   `port/pd_tr_st.c` (M4, syntax-gated against the real project headers;
+   keeps the GPDMA CH0/CH1 map and the open ST device layer).
+3. **SPR bench milestone**: ✅ DONE (host-green): attach + Source_Cap +
+   Request + explicit contract + PPS + detach/reattach + silent-source
+   HR over the simulated UCPD (`test_pdport_stack`, 6 SPR tests).
+4. **Feature parity**: ✅ DONE on the host seam. Board glue
+   `port/pdport_app.{h,cpp}` exposes the C API (status, req/PPS/EPR-AVS
+   requests, EPR enter/exit/auto, events) that the CLI/status modules
+   re-point onto (`test_pdport_app`, 5 cold-boot scenarios).  Board-side
+   remaining: edit the app call sites (`app_cli.c`, `app_pd.c`,
+   `app_epr.c`, `main.c`) onto the seam and compile in CubeIDE; VDM /
+   structured-Get tester commands have no pdsink engine (reject/ignore)
+   and report n/a on that path.
+5. **EPR bench milestone**: ✅ DONE on the host: EPR_Mode(Enter) via
+   pdsink's PE (auto entry), Enter_Succeeded, chunked EPR Source_Caps,
+   AVS request at 28 V/5 A, EPR keep-alives, sink-initiated exit (a
+   project-local pdsink core addition, `DPM::request_epr_exit`), entry-
+   failure and stalled-caps recovery — 4 EPR tests in `test_pdport_stack`
+   plus the app-glue scenarios.  **The board acceptance bar applies
+   unchanged and is NOT claimed**: Enter Succeeded + board alive must
+   still be demonstrated on the bench (flash-safety appendix in
+   `USB_UCPD/FLASHING.md`).
 
 
 

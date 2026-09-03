@@ -8,6 +8,8 @@ This directory holds the board-independent pdsink port for this project:
 | `include/pdport/pd_ucpd_driver.h` | pdsink `IDriver` (= ITCPC + ITimer) over the transport |
 | `src/pd_ucpd_driver.cpp` | The driver (host-benched, IRQ-safe, single 1 ms service pump) |
 | `src/pd_tr_st.c` | **M4**: STM32H7RS transport — binds the driver to the open ST USB-PD device layer (`Middlewares/ST/STM32_USBPD_Library/Devices/STM32H7RSXX`) |
+| `include/pdport/pdport_app.h` | **M4-app**: C seam for the application modules (status snapshot, request engine, EPR control, events) |
+| `src/pdport_app.cpp` | **M4-app**: pdsink object graph for the board + implementation of the C seam (host-benched end-to-end) |
 
 Nothing in `port/` touches STM32 registers except `pd_tr_st.c`, and
 `pd_tr_st.c` uses only the open device layer (PHY API + `CAD_Init()` +
@@ -41,7 +43,7 @@ callbacks through `Ports[0].cbs`.
    - `Middlewares/PDEngine/pdsink/src/pd/*.cpp`
    - `Middlewares/PDEngine/pdsink/src/pd/utils/*.cpp`
    - `Middlewares/PDEngine/port/src/pd_ucpd_driver.cpp`
-   - new board glue (see “Board glue” below)
+   - `Middlewares/PDEngine/port/src/pdport_app.cpp` (board glue, see below)
 
    Include paths to add:
    - `Middlewares/PDEngine/etl/include`
@@ -69,11 +71,18 @@ callbacks through `Ports[0].cbs`.
      pdsink pump; keep the file excluded from now on).
 
    The rest of `Appli/USBPD/Target/*` and the `Appli/Core/Src/app_*.c`
-   application modules still compile; **their closed-core call sites are
-   the M4-app / M5 work items** (CLI status queries, `epr enter`,
-   fixed-PDO/PPS request engine, VDM), tracked in the milestone plan —
-   they get re-pointed at the pdsink DPM/PE state one by one.  Until
-   then the board keeps its current behaviour on the closed path; switch
+   application modules still compile.  **M4-app status**: the pdsink-side
+   re-pointing seam is done and host-proven (`pdport_app.h` — see the
+   mapping table under "Board glue" below); what remains is board-side
+   only: editing the app call sites (`app_cli.c` `req`/`pps`/`hr`/`sr`
+   bodies, `app_pd.c` request engine and state reads, `app_epr.c` EPR
+   verbs and status prints, `main.c`/`usbpd.c` init + loop hook) onto
+   that seam and compiling in CubeIDE.  Modules with no pdsink engine
+   behind them yet (VDM/cable discovery, structured-Get tester commands)
+   must be excluded from the pdsink build or left reporting "n/a" — the
+   pdsink core answers VDM with reject/ignore (pe.cpp) and has no
+   structured-Get initiator.  Until the switch-over the board keeps its
+   current behaviour on the closed path; switch
    over by doing steps 1–6.
 
 5. **Init (one-time, before the main loop)**: in `main.c`, after
@@ -94,60 +103,35 @@ callbacks through `Ports[0].cbs`.
    `USBPD_DPM_Run()` slice.  Everything else in the loop
    (`APP_PD_Task`, CLI, INA226, LED…) stays untouched.
 
-## Board glue (single C++ file, e.g. `Appli/Core/Src/pdport_app.cpp`)
+## Board glue — `port/src/pdport_app.cpp` (committed, host-benched)
 
-```cpp
-// pdport_app.cpp - pdsink object graph for the board (sink, CC-only).
-#include "pd_ucpd_driver.h"
-#include "pd_tr.h"
-#include "dpm.h"
-#include "pe.h"
-#include "port.h"
-#include "prl.h"
-#include "task.h"
-#include "tc.h"
+The glue is not a sample anymore: `src/pdport_app.cpp` (+
+`include/pdport/pdport_app.h`) lives in this tree and the host gate
+exercises it end-to-end (`test_pdport_app`; every scenario runs in its
+own process = one cold boot, because the graph is a boot-time object
+exactly like the board's).  It owns the single-port pdsink graph and
+exposes the C seam the application modules call on the pdsink path:
 
-namespace {
+| C function | Replaces (closed core) | App call sites |
+|------------|------------------------|----------------|
+| `pdport_init()` / `pdport_service()` | `MX_USBPD_Init` body; `USBPD_DPM_InitCore` + `USBPD_DPM_Run` | `main.c` |
+| `pdport_get_status()` | `DPM_Params` / `USBPD_DPM_GetDataInfo` reads | CLI status tables (`pd`, `epr`) |
+| `pdport_request_position/any/pps/epr_avs()` | `USBPD_PE_Send_Request`, PPS engine | `req`, `pps` command bodies |
+| `pdport_epr_enter/exit/auto()` | `USBPD_PE_Request_EPRModeEnter/Exit` | `epr` command body |
+| `pdport_set_event_cb()` | `USBPD_DPM_*` notify callbacks | `APP_PD_OnNotify`-style modules |
 
-pd::Port        g_port;
-pdport::UcpdDriver g_driver{g_port};
+EPR verbs return explicit codes (`QUEUED` / `ALREADY` / `NOT_ACTIVE` /
+`SPR_FIRST` / `REFUSED` / `FAILED`) so a CLI never reports a queued
+request as an entered mode.  `epr exit` implements the PD 3.1 two-step
+(SPR-level contract first) and says so via `PDPORT_EPR_EXIT_SPR_FIRST`.
+With no trigger armed the pdsink default DPM policy applies: request the
+first supported source PDO (vSafe5V).
 
-class BoardDpm : public pd::DPM {
-public:
-    BoardDpm(pd::Port& p) : pd::DPM(p) {}
-    // Optional: override get_sink_pdo_list()/get_epr_watts() to mirror the
-    // board's declared sink capabilities (see pdsink dpm.cpp defaults).
-};
-
-BoardDpm    g_dpm{g_port};
-pd::TC      g_tc{g_port, g_driver};
-pd::PRL     g_prl{g_port, g_driver};
-pd::PE      g_pe{g_port, g_dpm, g_prl, g_driver};
-pd::Task    g_task{g_port, g_driver};
-
-bool g_started = false;
-
-} // namespace
-
-extern "C" {
-
-int pdport_init(void)
-{
-    if (g_started) { return 0; }
-    if (pd_tr_init() != 0) { return -1; }
-    g_task.start(g_tc, g_dpm, g_pe, g_prl, g_driver);
-    g_started = true;
-    return 0;
-}
-
-void pdport_service(void)
-{
-    if (!g_started) { return; }
-    g_driver.service();   // 1 ms pdsink tick + IRQ-event processing
-}
-
-} // extern "C"
-```
+The board DPM publishes the sink PDO table from `usbpd_pdo_defs.h`
+(5/9/12/15/20 V + PPS) plus an EPR block derived from the compile-time
+`PDPORT_CEILING_MV` (default 28 000 = `APP_EPR_DEFAULT_CEILING_MV`) and
+`PDPORT_EPR_WATTS` (default 140) macros in `pdport_app.cpp` — review
+those when the board's front-end rating changes.
 
 Notes:
 - `UcpdDriver::service()` must be called at least once per millisecond.
@@ -198,13 +182,23 @@ Notes:
 toolchain:
 
 1. `test_pdport_driver` — M2 driver unit suite (15 tests),
-2. `test_pdport_stack` — M3 full-stack SPR bench over the simulated
-   transport (6 tests: fixed 12 V, vSafe5V fallback, PPS, PPS change,
-   detach/reattach, silent-source hard reset),
-3. `pd_tr_st.c` syntax check against the real project headers/defines
+2. `test_pdport_stack` — M3 full-stack SPR bench + M5 EPR bench over the
+   simulated transport (10 tests: 6 SPR — fixed 12 V, vSafe5V fallback,
+   PPS, PPS change, detach/reattach, silent-source hard reset — and 4
+   EPR: Enter_Succeeded + AVS contract + keep-alives, sink-initiated
+   exit to SPR then PPS, Enter_Failed disabling auto-entry with SPR
+   intact, stalled-EPR-caps hard-reset recovery),
+3. `test_pdport_app` — M4-app board-glue suite: `pdport_app.cpp` driven
+   through its C seam (init/service, status snapshot, req/PPS/EPR-AVS
+   requests, EPR enter/two-step exit/auto with truthful return codes,
+   detach/reattach, refusals), one cold boot per scenario,
+4. `pd_tr_st.c` syntax check against the real project headers/defines
    (`-Wall -Wextra`, no warnings from the transport file).
 
 Milestones: M1 = vendored pdsink core + engine host gate (green), M2 =
 UCPD driver + gate (green), M3 = full-stack SPR bench (green), M4 =
-ST transport (this file, green) + CubeIDE wiring (this guide) + app
-re-pointing, M5 = EPR bench + flash-safety summary.
+ST transport (green) + CubeIDE wiring (this guide) + app glue
+(`pdport_app`, green on the host gate; the per-command app re-pointing
+table is above), M5 = EPR bench (host: green — see the 4 EPR tests) +
+board bench (pending, live hardware) + flash-safety summary
+(`USB_UCPD/FLASHING.md` appendix).
