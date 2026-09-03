@@ -232,6 +232,27 @@ void DPM::request_epr_exit() {
     }
 }
 
+void DPM::request_epr_entry() {
+    // Lift the auto-entry latch a failed entry attempt or a sink-initiated
+    // exit leaves behind, then arm the entry request.  The PE checks the
+    // remaining preconditions (explicit contract, PD 3.x, EPR-capable
+    // source) when it processes the request and drops it with a log line
+    // if they do not hold.
+    port.pe_flags.clear(PE_FLAG::EPR_AUTO_ENTER_DISABLED);
+    port.dpm_requests.set(DPM_REQUEST_FLAG::EPR_MODE_ENTRY);
+}
+
+void DPM::enable_auto_epr_entry(bool enable) {
+    if (enable) {
+        // No need to arm EPR_MODE_ENTRY here: PE_SNK_Ready raises it
+        // automatically whenever an EPR-capable source is present.
+        port.pe_flags.clear(PE_FLAG::EPR_AUTO_ENTER_DISABLED);
+    } else {
+        port.pe_flags.set(PE_FLAG::EPR_AUTO_ENTER_DISABLED);
+        port.dpm_requests.clear(DPM_REQUEST_FLAG::EPR_MODE_ENTRY);
+    }
+}
+
 void DPM::trigger_variant(PDO_VARIANT pdo_variant, uint32_t mv, uint32_t ma) {
     trigger_mv = mv;
     trigger_ma = ma;

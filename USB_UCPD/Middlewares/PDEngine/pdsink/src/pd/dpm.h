@@ -78,6 +78,23 @@ public:
     // wait for the contract change to complete.  No-op when not in EPR mode.
     void request_epr_exit();
 
+    // Project-local addition: ask the policy engine to enter EPR mode
+    // (PD 3.1 EPR_Mode(Enter)).  Also lifts the EPR_AUTO_ENTER_DISABLED
+    // latch a failed entry attempt or a sink-initiated exit leaves behind,
+    // so a CLI "epr enter" can retry without a reset.  The PE honours the
+    // request only while the spec preconditions hold (explicit contract,
+    // PD 3.x revision, EPR-capable source PDO 1) and otherwise drops it
+    // with a log line.
+    void request_epr_entry();
+
+    // Project-local addition: enable/disable *automatic* EPR mode entry
+    // (CLI "epr on|off").  Only affects future entries: an active EPR
+    // contract is left untouched (request_epr_exit() leaves it).  With
+    // `enable` true the PE_SNK_Ready auto-entry check raises the entry
+    // request on its own once an EPR-capable source is present; with
+    // false, any pending entry request is cancelled.
+    void enable_auto_epr_entry(bool enable);
+
 protected:
     Port& port;
 
