@@ -33,9 +33,47 @@
  *   7. APP_ENG_STORE      - backup-SRAM persistence init.
  *
  * Nothing here changes CubeMX-generated code or the ST middleware.
+ *
+ * PDSINK PROFILE
+ * --------------
+ * PDENGINE_PDSINK (project-wide -D, default OFF) selects the open pdsink
+ * engine path instead of the closed ST USBPD PE/PRL core (see
+ * Middlewares/PDEngine/port/README.md).  The ST-core-bound engines below
+ * are force-disabled in that profile because their data source (the ST
+ * trace funnel / ST PE VDM callbacks / the ST EPR DPM requests) does not
+ * exist there; APP_ENG_DIAG stays on and APP_ENG_EPR is replaced by the
+ * pdsink PE EPR states behind the pdport_app.h seam.  The application
+ * modules carry their own #if PDENGINE_PDSINK branches (request engine,
+ * EPR verbs, structured-Get commands) - this file only fixes the engine
+ * switches that would otherwise pull closed-core symbols.
  */
 #ifndef APP_ENGINES_H
 #define APP_ENGINES_H
+
+#if defined(PDENGINE_PDSINK)
+/* Re-assert the safe defaults first (a user -D may have turned any of
+ * these on), then force off every engine that binds the closed ST core. */
+#undef  APP_ENG_CAPTURE
+#define APP_ENG_CAPTURE      0   /* ST trace funnel does not exist on pdsink */
+#undef  APP_ENG_TXN
+#define APP_ENG_TXN          0
+#undef  APP_ENG_CABLE_VDM
+#define APP_ENG_CABLE_VDM    0   /* E-marker/VDM has no pdsink engine (n/a)  */
+#undef  APP_ENG_EPR
+#define APP_ENG_EPR          0   /* EPR lives in the pdsink PE + seam now    */
+#undef  APP_ENG_VDM
+#define APP_ENG_VDM          0
+#undef  APP_ENG_ANALYTICS
+#define APP_ENG_ANALYTICS    0
+#undef  APP_ENG_STORE
+#define APP_ENG_STORE        0
+#undef  APP_ENG_EXT
+#define APP_ENG_EXT          0
+#undef  APP_ENG_FUZZ
+#define APP_ENG_FUZZ         0
+#undef  APP_ENG_TEST
+#define APP_ENG_TEST         0
+#endif /* PDENGINE_PDSINK */
 
 /* BENCH PROFILE: the requested feature set, and nothing that destabilises it.
  *
@@ -115,11 +153,19 @@
 
 /** One-line summary of what is compiled out, printed once at startup so the
  *  log on the bench says exactly which build is running. */
+#if defined(PDENGINE_PDSINK)
 #define APP_ENG_SUMMARY \
-  "cap=" APP_ENG_STR(APP_ENG_CAPTURE) " txn=" APP_ENG_STR(APP_ENG_TXN) \
+  "stack=pdsink cap=" APP_ENG_STR(APP_ENG_CAPTURE) " txn=" APP_ENG_STR(APP_ENG_TXN) \
   " cable=" APP_ENG_STR(APP_ENG_CABLE_VDM) " epr=" APP_ENG_STR(APP_ENG_EPR) \
   " vdm=" APP_ENG_STR(APP_ENG_VDM) " diag=" APP_ENG_STR(APP_ENG_DIAG) \
   " anal=" APP_ENG_STR(APP_ENG_ANALYTICS) " store=" APP_ENG_STR(APP_ENG_STORE)
+#else
+#define APP_ENG_SUMMARY \
+  "stack=st cap=" APP_ENG_STR(APP_ENG_CAPTURE) " txn=" APP_ENG_STR(APP_ENG_TXN) \
+  " cable=" APP_ENG_STR(APP_ENG_CABLE_VDM) " epr=" APP_ENG_STR(APP_ENG_EPR) \
+  " vdm=" APP_ENG_STR(APP_ENG_VDM) " diag=" APP_ENG_STR(APP_ENG_DIAG) \
+  " anal=" APP_ENG_STR(APP_ENG_ANALYTICS) " store=" APP_ENG_STR(APP_ENG_STORE)
+#endif
 
 #define APP_ENG_STR2(x) #x
 #define APP_ENG_STR(x)  APP_ENG_STR2(x)

@@ -52,7 +52,16 @@ extern "C" {
 
 /* Exported functions prototypes ---------------------------------------------*/
 void Error_Handler(void);
-/* Latch fault registers and blink a fault code (2=Hard 3=MemManage 4=Bus 5=Usage). */
+/* Fault-handler report core.  Called from the naked fault-vector
+ * trampolines (HardFault_Handler/MemManage_Handler/BusFault_Handler/
+ * UsageFault_Handler) in main.c with the captured hardware exception frame
+ * (stacked R0..R3,R12,LR,PC,xPSR) and the fault code; stores code + fault
+ * registers + PC/LR in backup SRAM, prints them on the trace UART and
+ * blinks.  Codes: 2=HardFault 3=MemManage 4=BusFault 5=UsageFault.
+ * Never returns. */
+void APP_FaultReportCore(uint32_t *frame, uint32_t code);
+/* Legacy single-argument wrapper (no PC capture) kept for any caller that is
+ * not a fault handler.  Never returns. */
 void APP_FaultReport(uint32_t code);
 /* Print any fault record left in BKPSRAM by the previous run. */
 void APP_FaultReportBoot(void);

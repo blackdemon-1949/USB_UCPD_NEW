@@ -24,6 +24,10 @@
 /* USER CODE BEGIN 0 */
 #include "app_log.h"
 #include "main.h"
+#if defined(PDENGINE_PDSINK)
+#include "app_pd.h"       /* registers the pdsink event callback (APP_PD_Init) */
+#include "pdport_app.h"   /* pdsink C seam: init once before the main loop */
+#endif
 /* USER CODE END 0 */
 
 /* USER CODE BEGIN 1 */
@@ -39,6 +43,24 @@
 void MX_USBPD_Init(void)
 {
 
+#if defined(PDENGINE_PDSINK)
+  /* pdsink path: no closed USBPD core is linked, so the ST DPM init chain
+   * does not exist.  pdport_init() brings up the open ST device layer
+   * (PHY + CAD) and starts the pdsink graph; the 1 ms pump is called from
+   * the main loop (see main.c). */
+  /* APP_PD_Init() is normally reached through the closed core's
+   * USBPD_DPM_InitCore() -> USBPD_DPM_UserInit() chain.  No closed core is
+   * linked on this path, so run it here before the engine starts: it arms
+   * the pdsink event callback (pdport_set_event_cb) that feeds cable /
+   * contract / EPR state into the app. */
+  APP_PD_Init();
+  if (pdport_init() != 0)
+  {
+    APP_LOG_Write("usbpd: pdport_init failed\r\n");
+    Appli_Fatal(8);
+  }
+  __enable_irq();
+#else
   /* Global Init of USBPD HW */
   USBPD_HW_IF_GlobalHwInit();
 
@@ -72,6 +94,7 @@ void MX_USBPD_Init(void)
   /* Enable IRQ which has been disabled by FreeRTOS services */
   __enable_irq();
   /* USER CODE END EnableIRQ */
+#endif /* PDENGINE_PDSINK */
 
 }
 

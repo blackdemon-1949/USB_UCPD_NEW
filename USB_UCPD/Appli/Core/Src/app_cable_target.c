@@ -46,11 +46,22 @@ extern const USBPD_VDM_Callbacks vdmCallbacks;
 
 int APP_CBL_RegisterVdm(uint8_t port)
 {
+#if defined(PDENGINE_PDSINK)
+  /* The VDM callbacks are registered into the closed ST PE, which is not
+   * linked on this path (the pdsink PE answers unsolicited VDM with NAK and
+   * has no SVDM client).  Nothing to register: cable identity stays
+   * unknown, so APP_CBL_Evaluate() reports "no cable" until a pdsink VDM
+   * engine exists. */
+  (void)port;
+  s_vdm_registered = 0u;
+  return 0;
+#else
   /* USBPD_PE_InitVDM_Callback() takes a non-const pointer; the table itself is
    * const and the PE only reads it. */
   USBPD_PE_InitVDM_Callback(port, (USBPD_VDM_Callbacks *)&vdmCallbacks);
   s_vdm_registered = 1u;
   return 1;
+#endif
 }
 
 uint8_t APP_CBL_VdmRegistered(void)

@@ -13,10 +13,41 @@
 #if defined(_TRACE)
 #include "usbpd_trace.h"
 #endif
+#if defined(PDENGINE_PDSINK)
+#include "pdport_app.h"     /* pdsink C seam (see PDEngine/port/README.md) */
+#endif
 #include <string.h>
 #include <stdio.h>
 
 extern uint32_t HAL_GetTick(void);
+
+#if defined(PDENGINE_PDSINK)
+/* --- pdsink path: the closed ST core is not linked, so nothing here may
+ *     call the USBPD_PE_* / DPM_* entry points or read DPM_Params.  State
+ *     is polled from the pdport seam snapshot every main-loop pass and
+ *     events arrive through the seam callback registered in APP_PD_Init.
+ *     Default OFF: the whole block compiles only when the project is built
+ *     with -DPDENGINE_PDSINK. */
+static pdport_status_t s_pd_snap;      /* last seam snapshot               */
+static uint8_t  s_pd_was_attached;     /* edge detection vs. last snapshot */
+static uint8_t  s_pd_was_contract;
+static uint8_t  s_pd_was_epr;
+static uint8_t  s_pd_was_pps;
+static uint32_t s_pd_last_rx;          /* driver counter deltas -> APP_DIAG */
+static uint32_t s_pd_last_rxcrc;
+static uint32_t s_pd_last_tx;
+static uint32_t s_pd_last_txok;
+static uint32_t s_pd_last_txerr;
+static uint32_t s_pd_last_hrx;
+static uint32_t s_pd_last_hsent;
+static uint32_t s_pd_caps_sig;         /* source-caps change signature      */
+
+static void app_pd_evt(uint32_t ev, void *arg);
+static void app_pd_sync(uint8_t port);
+static void app_pd_diag_feed(const pdport_status_t *st);
+static int  pdsink_resolve_op(uint32_t pdo, uint16_t mv, uint16_t ma,
+                              uint32_t *out_mv, uint32_t *out_ma);
+#endif /* PDENGINE_PDSINK */
 static uint32_t s_vbus_restore_at;   /* when to re-assert the synthetic 5 V after a hard reset */
 static uint32_t s_diag_next;         /* next PHY diagnostic trace timestamp */
 
@@ -59,6 +90,22 @@ void APP_PD_Init(void)
   s_epr_enter_at = 0U;
   s_caps_printed = 0U;
   s_sweep_active = 0U;
+#if defined(PDENGINE_PDSINK)
+  /* pdsink: cable/contract/ready events arrive through the seam callback
+   * (the closed core's USBPD_DPM_Notification chain does not exist here).
+   * Registering before pdport_init() is fine: the callback is stored and
+   * only fires once the pdsink Task runs. */
+  s_pd_was_attached = 0U;
+  s_pd_was_contract = 0U;
+  s_pd_was_epr = 0U;
+  s_pd_was_pps = 0U;
+  s_pd_last_rx = 0U; s_pd_last_rxcrc = 0U; s_pd_last_tx = 0U;
+  s_pd_last_txok = 0U; s_pd_last_txerr = 0U;
+  s_pd_last_hrx = 0U; s_pd_last_hsent = 0U;
+  s_pd_caps_sig = 0U;
+  memset(&s_pd_snap, 0, sizeof(s_pd_snap));
+  pdport_set_event_cb(app_pd_evt, NULL);
+#endif
 }
 
 uint8_t APP_PD_IsAttached(void)
@@ -83,6 +130,16 @@ void APP_PD_SetVbusMv(uint32_t mv)
 
 void APP_PD_OnCable(uint8_t port, USBPD_CAD_EVENT ev)
 {
+#if defined(PDENGINE_PDSINK)
+  /* pdsink path: nothing calls this (the closed core's CAD callback chain
+   * is not compiled).  Cable events reach the app through the seam event
+   * callback (app_pd_evt) and the per-pass snapshot sync.  Keep the symbol
+   * for any residual linker references, but never touch DPM_Params here -
+   * the ST DPM globals are not linked on this path. */
+  (void)port;
+  (void)ev;
+  return;
+#else
   if (port >= USBPD_PORT_COUNT)
   {
     return;
@@ -133,7 +190,368 @@ void APP_PD_OnCable(uint8_t port, USBPD_CAD_EVENT ev)
       APP_LOG_Printf("\r\n[PD] CC detached\r\n");
       break;
   }
+#endif /* PDENGINE_PDSINK */
 }
+
+/* ---------------------------------------------------------------------- */
+/* pdsink path: seam event + snapshot sync                                */
+/*                                                                        */
+/* The pdsink engine (Middlewares/PDEngine) replaces the closed ST core   */
+/* on the wire; these helpers translate its events and status snapshot    */
+/* into exactly the APP_PD_Port_t state and console reports the rest of   */
+/* this file (status/caps/automation/CLI) already produce.  Compile-time  */
+/* default OFF; the #if PDENGINE_PDSINK branches above and below keep the */
+/* closed-core path byte-identical.                                       */
+/* ---------------------------------------------------------------------- */
+#if defined(PDENGINE_PDSINK)
+
+static void app_pd_evt(uint32_t ev, void *arg)
+{
+  APP_PD_Port_t *p = &APP_PD_Port[0];
+  uint32_t now = HAL_GetTick();
+
+  (void)arg;
+  switch (ev)
+  {
+    case PDPORT_EV_CABLE_ATTACHED:
+      p->Attached = 1U;
+      p->Contract = 0U;
+      p->NumberOfRcvSRCPDO = 0U;
+      p->UserSelected = 0U;
+      p->PendingIndex = 0U;
+      p->RDOPosition = 0U;
+      s_pd_caps_sig = 0U;
+      /* CC-only tester: the pdsink PE waits for vSafe5V after Accept; the
+         board has no VBUS ADC, so synthesize 5 V exactly like the closed
+         path did (APP_PD_Port.SyntheticVbusMv is the software VBUS view). */
+      p->SyntheticVbusMv = 5000U;
+      s_vbus_restore_at = 0U;
+      s_auto_applied = 0U;
+      s_snk_ready_seen = 0U;
+      s_caps_printed = 0U;
+      APP_LED_Set(APP_LED_PD_WAIT);
+      APP_DIAG_Inc(APP_DIAG_ATTACH);
+      APP_DIAG_Inc(APP_DIAG_CAD_EVENT);
+      /* CCx is filled from the snapshot on the next sync pass (the event
+       * callback may fire before the driver state is published). */
+      APP_LOG_Write("\r\n[PD] CC attached (pdsink)\r\n");
+      break;
+    case PDPORT_EV_CABLE_DETACHED:
+      p->Attached = 0U;
+      p->Contract = 0U;
+      p->NumberOfRcvSRCPDO = 0U;
+      p->SyntheticVbusMv = 0U;
+      p->RDOPosition = 0U;
+      s_pd_caps_sig = 0U;
+      s_vbus_restore_at = 0U;
+      s_auto_applied = 0U;
+      s_snk_ready_seen = 0U;
+      s_caps_printed = 0U;
+      s_sweep_active = 0U;
+      APP_LED_Set(APP_LED_HEARTBEAT);
+      APP_DIAG_Inc(APP_DIAG_DETACH);
+      APP_DIAG_Inc(APP_DIAG_CAD_EVENT);
+      APP_LOG_Printf("\r\n[PD] CC detached (pdsink)\r\n");
+      break;
+    case PDPORT_EV_SNK_READY:
+      /* Mirror of the closed path's USBPD_NOTIFY_STATE_SNK_READY handling:
+         the PE re-enters SNK_READY on attach and after every request.  The
+         auto/remember application is deferred to APP_PD_Task. */
+      if (s_snk_ready_seen == 0U)
+      {
+        APP_LOG_Write("[PD] SNK ready\r\n");
+        s_snk_ready_seen = 1U;
+      }
+      s_auto_pending = 1U;
+      break;
+    case PDPORT_EV_POWER_ACCEPTED:
+      APP_LOG_Write("[PD] REQUEST accepted\r\n");
+      break;
+    case PDPORT_EV_POWER_REJECTED:
+      APP_DIAG_Inc(APP_DIAG_NEG_REJECT);
+      APP_LOG_Write("[PD] REQUEST rejected\r\n");
+      break;
+    case PDPORT_EV_EPR_ENTRY_FAILED:
+      APP_DIAG_Inc(APP_DIAG_NEG_REJECT);
+      APP_EPR_Ctx.n_failed++;
+      APP_EPR_Ctx.error_valid = 1u;
+      APP_EPR_Ctx.last_action = APP_EPR_ACT_ENTER_FAILED;
+      APP_LOG_Write("[PD] EPR_Mode(Enter): source refused - staying in SPR "
+                    "(pdsink PE)\r\n");
+      break;
+    case PDPORT_EV_TRANSIT_TO_DEFAULT:
+      /* Hard reset / error-recovery path: the contract is gone.  Mirror the
+         closed path's hard-reset bookkeeping: drop the synthetic VBUS and
+         re-assert 5 V shortly after, once the source recovers. */
+      if (p->Attached != 0U)
+      {
+        p->Contract = 0U;
+        p->SyntheticVbusMv = 0U;
+        s_vbus_restore_at = now + 50U;
+        s_snk_ready_seen = 0U;
+        s_caps_printed = 0U;
+        APP_LED_Set(APP_LED_PD_WAIT);
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+static void app_pd_diag_feed(const pdport_status_t *st)
+{
+  /* 'diag'/'epr diag' counters used to come from the ST trace funnel, which
+     does not exist on the pdsink path.  Feed the same APP_DIAG counters from
+     the driver counters so the reports stay real. */
+  APP_DIAG_Add(APP_DIAG_PD_TX, (uint32_t)(st->tx_frames - s_pd_last_tx));
+  APP_DIAG_Add(APP_DIAG_PD_RX, (uint32_t)(st->rx_frames - s_pd_last_rx));
+  APP_DIAG_Add(APP_DIAG_PD_GOODCRC_RX,
+                 (uint32_t)(st->rx_goodcrc - s_pd_last_rxcrc));
+  APP_DIAG_Add(APP_DIAG_PD_TIMEOUT, (uint32_t)(st->tx_failed - s_pd_last_txerr));
+  s_pd_last_tx = st->tx_frames;
+  s_pd_last_rx = st->rx_frames;
+  s_pd_last_rxcrc = st->rx_goodcrc;
+  s_pd_last_txerr = st->tx_failed;
+}
+
+/** Decode the operating point the request engine is about to ask for, from a
+ *  raw source PDO, the same way build_rdo() does on the closed path. */
+static int pdsink_resolve_op(uint32_t pdo, uint16_t mv, uint16_t ma,
+                             uint32_t *out_mv, uint32_t *out_ma)
+{
+  USBPD_PDO_TypeDef u;
+
+  u.d32 = pdo;
+  if (out_mv == NULL || out_ma == NULL)
+  {
+    return -1;
+  }
+  switch (u.GenericPDO.PowerObject)
+  {
+    case USBPD_CORE_PDO_TYPE_FIXED:
+      *out_mv = (uint32_t)u.SRCFixedPDO.VoltageIn50mVunits * 50U;
+      *out_ma = (ma != 0U) ? (uint32_t)ma
+                           : (uint32_t)u.SRCFixedPDO.MaxCurrentIn10mAunits * 10U;
+      if (*out_ma > (uint32_t)u.SRCFixedPDO.MaxCurrentIn10mAunits * 10U)
+      {
+        *out_ma = (uint32_t)u.SRCFixedPDO.MaxCurrentIn10mAunits * 10U;
+      }
+      return 0;
+#ifdef USBPDCORE_PPS
+    case USBPD_CORE_PDO_TYPE_APDO:
+    {
+      uint32_t min_mv = (uint32_t)u.SRCSNKAPDO.MinVoltageIn100mV * 100U;
+      uint32_t max_mv = (uint32_t)u.SRCSNKAPDO.MaxVoltageIn100mV * 100U;
+      uint32_t max_ma = (uint32_t)u.SRCSNKAPDO.MaxCurrentIn50mAunits * 50U;
+      uint32_t req_mv = (mv != 0U) ? (uint32_t)mv : min_mv;
+      uint32_t req_ma = (ma != 0U) ? (uint32_t)ma : max_ma;
+      if (req_mv < min_mv) { req_mv = min_mv; }
+      if (req_mv > max_mv) { req_mv = max_mv; }
+      if (req_ma > max_ma) { req_ma = max_ma; }
+      *out_mv = req_mv;
+      *out_ma = req_ma;
+      return 0;
+    }
+#endif
+    default:
+      return -1;
+  }
+}
+
+/** Poll the pdsink snapshot once and fold it into the app state (edges,
+ *  console reports, caps storage/PPS feed, EPR-mode transitions). */
+static void app_pd_sync(uint8_t port)
+{
+  pdport_status_t st;
+  uint8_t n;
+  uint8_t changed;
+
+  if (port != 0U)
+  {
+    return;
+  }
+  pdport_get_status(&st);
+
+  /* --- diagnostic counters --- */
+  app_pd_diag_feed(&st);
+
+  /* --- hard resets on the wire (driver counters; no ST PE event exists) */
+  if (st.hr_rx != s_pd_last_hrx)
+  {
+    uint32_t d = st.hr_rx - s_pd_last_hrx;
+    APP_PD_Port[0].Contract = 0U;
+    s_pd_last_hrx = st.hr_rx;
+    APP_DIAG_Add(APP_DIAG_PD_HARD_RESET, d);
+    APP_LOG_Write("[PD] hard reset received\r\n");
+  }
+  if (st.hr_sent != s_pd_last_hsent)
+  {
+    uint32_t d = st.hr_sent - s_pd_last_hsent;
+    s_pd_last_hsent = st.hr_sent;
+    APP_DIAG_Add(APP_DIAG_PD_HARD_RESET, d);
+    APP_LOG_Write("[PD] hard reset sent\r\n");
+  }
+
+  /* --- attach/detach edges (belt and braces for the event callback) --- */
+  if ((st.attached != 0U) && (s_pd_was_attached == 0U))
+  {
+    APP_PD_Port[0].Attached = 1U;
+    s_pd_was_attached = 1U;
+  }
+  else if ((st.attached == 0U) && (s_pd_was_attached != 0U))
+  {
+    APP_PD_Port[0].Attached = 0U;
+    APP_PD_Port[0].Contract = 0U;
+    APP_PD_Port[0].NumberOfRcvSRCPDO = 0U;
+    s_pd_was_attached = 0U;
+    s_pd_was_contract = 0U;
+    s_pd_was_epr = 0U;
+    s_pd_was_pps = 0U;
+    s_pd_caps_sig = 0U;
+  }
+  if (st.attached == 0U)
+  {
+    return;
+  }
+
+  /* --- active CC line --- */
+  if ((st.active_cc == 1U) || (st.active_cc == 2U))
+  {
+    APP_PD_Port[0].CCx = (uint8_t)st.active_cc;
+  }
+
+  /* --- explicit contract edges --- */
+  if ((st.explicit_contract != 0U) && (s_pd_was_contract == 0U))
+  {
+    s_pd_was_contract = 1U;
+    APP_PD_Port[0].Contract = 1U;
+    APP_PD_Port[0].RDOPosition = st.contract_position;
+    APP_PD_Port[0].RequestedVoltage = st.contract_mv;
+    APP_PD_Port[0].RequestedCurrent = st.contract_ma;
+    APP_PD_Port[0].SyntheticVbusMv = (st.contract_mv != 0U) ? st.contract_mv
+                                                            : 5000U;
+    APP_DIAG_Inc(APP_DIAG_NEG_CONTRACT);
+    APP_LED_Set(APP_LED_PD_CONTRACT);
+    APP_LOG_Printf("[PD] explicit contract  %lu mV / %lu mA  (PDO %lu)  "
+                   "%s\r\n",
+                   (unsigned long)st.contract_mv,
+                   (unsigned long)st.contract_ma,
+                   (unsigned long)st.contract_position,
+                   (st.in_pps_contract != 0U) ? "PPS" :
+                     ((st.in_epr_mode != 0U) ? "EPR" : "SPR"));
+  }
+  else if ((st.explicit_contract == 0U) && (s_pd_was_contract != 0U))
+  {
+    s_pd_was_contract = 0U;
+    APP_PD_Port[0].Contract = 0U;
+    APP_PD_Port[0].RDOPosition = 0U;
+    APP_LOG_Write("[PD] contract ended\r\n");
+  }
+  else if ((st.explicit_contract != 0U) && (s_pd_was_contract != 0U) &&
+           (st.contract_position != APP_PD_Port[0].RDOPosition))
+  {
+    /* Contract renegotiated without dropping (request accepted -> new PDO).
+     * Refresh the operating-point mirror from the snapshot so the status
+     * tables always show the REAL negotiated point, never the last wish. */
+    APP_PD_Port[0].RDOPosition = st.contract_position;
+    APP_PD_Port[0].RequestedVoltage = st.contract_mv;
+    APP_PD_Port[0].RequestedCurrent = st.contract_ma;
+    APP_PD_Port[0].SyntheticVbusMv = (st.contract_mv != 0U) ? st.contract_mv
+                                                            : 5000U;
+    APP_LOG_Printf("[PD] contract updated  %lu mV / %lu mA  (PDO %lu)%s\r\n",
+                   (unsigned long)st.contract_mv,
+                   (unsigned long)st.contract_ma,
+                   (unsigned long)st.contract_position,
+                   (st.in_pps_contract != 0U) ? "  PPS" : "");
+  }
+
+  /* --- EPR mode edges (mode entry itself never moves the operating point) */
+  if ((st.in_epr_mode != 0U) && (s_pd_was_epr == 0U))
+  {
+    s_pd_was_epr = 1U;
+    APP_EPR_Ctx.entered = 1u;
+    APP_EPR_Ctx.mode = 1u;
+    APP_EPR_Ctx.n_enter++;
+    APP_EPR_Ctx.last_action = APP_EPR_ACT_ENTER_SUCCEEDED;
+    APP_LOG_Printf("[PD] EPR_Mode: Enter Succeeded - EPR mode active (pdsink "
+                   "PE), %lu source PDOs\r\n", (unsigned long)st.src_caps_count);
+  }
+  else if ((st.in_epr_mode == 0U) && (s_pd_was_epr != 0U))
+  {
+    s_pd_was_epr = 0U;
+    APP_EPR_Ctx.entered = 0u;
+    APP_EPR_Ctx.mode = 0u;
+    APP_EPR_Ctx.n_exit++;
+    APP_EPR_Ctx.last_action = APP_EPR_ACT_EXIT;
+    APP_LOG_Write("[PD] EPR mode exited - back in SPR\r\n");
+  }
+  if ((st.in_pps_contract != 0U) && (s_pd_was_pps == 0U))
+  {
+    s_pd_was_pps = 1U;
+  }
+  else if ((st.in_pps_contract == 0U) && (s_pd_was_pps != 0U))
+  {
+    s_pd_was_pps = 0U;
+  }
+
+  /* --- source capabilities ---
+   * In SPR the list is stored for the PPS engine and the find-best helpers;
+   * in EPR mode the list contains EPR objects (up to 11) that do not fit the
+   * 7-slot SPR store - the epr command reads the full list from the snapshot
+   * directly, and PPS windows only exist in SPR, so the store is not fed. */
+  if (st.src_caps_count == 0U)
+  {
+    return;
+  }
+  {
+    uint32_t sig = st.src_caps_count;
+    uint8_t i;
+    uint8_t lim = (st.src_caps_count < 7u) ? (uint8_t)st.src_caps_count : 7u;
+
+    for (i = 0U; i < lim; i++)
+    {
+      sig ^= st.src_caps[i];
+    }
+    if (sig == s_pd_caps_sig)
+    {
+      return;
+    }
+    s_pd_caps_sig = sig;
+  }
+  if (st.in_epr_mode == 0U)
+  {
+    /* Same cap-clamping + console behaviour as APP_PD_StoreSrcPDO, fed from
+     * the seam snapshot (the words are host-order; this is an LE target). */
+    n = (st.src_caps_count <= USBPD_MAX_NB_PDO) ? (uint8_t)st.src_caps_count
+                                                : (uint8_t)USBPD_MAX_NB_PDO;
+    changed = (uint8_t)((n != APP_PD_Port[0].NumberOfRcvSRCPDO) ||
+                        (memcmp(APP_PD_Port[0].ListOfRcvSRCPDO, st.src_caps,
+                                (size_t)n * 4U) != 0));
+    memcpy(APP_PD_Port[0].ListOfRcvSRCPDO, st.src_caps, (size_t)n * 4U);
+    APP_PD_Port[0].NumberOfRcvSRCPDO = n;
+    if ((changed != 0U) || (s_caps_printed == 0U))
+    {
+      APP_LOG_Printf("[PD] source capabilities (%u PDO)\r\n", (unsigned)n);
+      s_caps_printed = 1U;
+    }
+    /* Feed the PPS window engine exactly like the closed core's
+     * USBPD_DPM_GetDataInfo glue did (usbpd_dpm_user.c); the words are
+     * host-order on this LE target, i.e. the same byte stream. */
+    APP_PPS_OnSrcPdo((const uint8_t *)(const void *)st.src_caps,
+                     (uint32_t)n * 4U);
+  }
+  else
+  {
+    /* EPR mode: the seam list holds EPR objects (up to 11) that do not fit
+     * the 7-slot SPR store, and mixing them in would silently change what
+     * 'req <n>' positions mean.  Leave the SPR store as the last SPR offer:
+     * every table and request path reads the live snapshot instead, so the
+     * reported list and the requested position always agree with the wire. */
+    APP_EPR_Ctx.n_src_cap++;   /* a (new) EPR_Source_Capabilities arrived */
+  }
+}
+
+#endif /* PDENGINE_PDSINK */
 
 void APP_PD_OnNotify(uint8_t port, USBPD_NotifyEventValue_TypeDef ev)
 {
@@ -203,6 +621,12 @@ void APP_PD_OnNotify(uint8_t port, USBPD_NotifyEventValue_TypeDef ev)
 void APP_PD_Task(void)
 {
   uint32_t now = HAL_GetTick();
+
+#if defined(PDENGINE_PDSINK)
+  /* pdsink path: fold the seam snapshot into the app state every pass
+     (attached/contract/EPR edges, caps storage, driver counters). */
+  app_pd_sync(0U);
+#endif
 
   /* Re-assert the synthetic 5 V after a hard reset, so the PE can leave
      PE_SNK_HARD_RESET_WAIT_VSAFE_0V and go back to waiting for caps. */
@@ -347,10 +771,11 @@ void APP_PD_Task(void)
     }
   }
 
-#if defined(_TRACE)
+#if defined(_TRACE) && !defined(PDENGINE_PDSINK)
   /* Periodic PHY diagnostic: report what the UCPD actually sees on the CC
      line, so a CubeMonitor capture shows whether the source is transmitting
-     and what message type arrived. */
+     and what message type arrived.  (ST-core trace only: the ST trace
+     funnel does not exist on the pdsink path.) */
   if ((int32_t)(now - s_diag_next) >= 0)
   {
     char _s[128];
@@ -534,6 +959,49 @@ void APP_PD_PrintCaps(void)
 {
   char line[96];
   uint8_t i;
+#if defined(PDENGINE_PDSINK)
+  /* pdsink path: print the full current list (up to 11 PDOs in EPR mode)
+     straight from the seam snapshot - the 7-slot SPR store only holds the
+     first seven objects and would mislabel an EPR list. */
+  pdport_status_t st;
+  uint8_t n;
+
+  pdport_get_status(&st);
+  n = (uint8_t)((st.src_caps_count <= 11u) ? st.src_caps_count : 11u);
+  if ((st.attached == 0U) || (n == 0U))
+  {
+    APP_LOG_Write("no source capabilities (attach a PD source on one of PM0/PM1 plus GND)\r\n");
+    return;
+  }
+  APP_LOG_Write("The source offers these power levels:\r\n");
+  for (i = 0; i < n; i++)
+  {
+    if (st.src_caps[i] == 0U)
+    {
+      APP_LOG_Printf("  [%u] (not offered)\r\n", (unsigned)(i + 1U));
+      continue;
+    }
+    if (APP_EPR_IsAvsPdo(st.src_caps[i]) != 0)
+    {
+      APP_EPR_FormatAvs(st.src_caps[i], line, sizeof(line));
+      APP_LOG_Printf("  [%u] %s\r\n", (unsigned)(i + 1U), line);
+    }
+    else
+    {
+      APP_PD_FormatPdo(st.src_caps[i], line, sizeof(line));
+      APP_LOG_Printf("  [%u] %s\r\n", (unsigned)(i + 1U), line);
+    }
+  }
+  if (st.in_epr_mode != 0U)
+  {
+    APP_LOG_Write("EPR mode: request a fixed/SPR position with req <n>, or an AVS\r\n");
+    APP_LOG_Write("voltage with:  epr request <mv>\r\n");
+  }
+  else
+  {
+    APP_LOG_Write("Ask for one with:  req <n> [ma]   |   volt <mv> [ma]   |   pps <mv> [ma]\r\n");
+  }
+#else
   uint8_t n = APP_PD_Port[0].NumberOfRcvSRCPDO;
   if ((APP_PD_Port[0].Attached == 0U) || (n == 0U))
   {
@@ -547,6 +1015,7 @@ void APP_PD_PrintCaps(void)
     APP_LOG_Printf("  [%u] %s\r\n", (unsigned)(i + 1U), line);
   }
   APP_LOG_Write("Ask for one with:  req <n> [ma]   |   volt <mv> [ma]   |   pps <mv> [ma]\r\n");
+#endif
 }
 
 void APP_PD_PrintStatus(void)
@@ -585,8 +1054,52 @@ void APP_PD_PrintStatus(void)
     APP_LOG_Write("No power request has been made yet.\r\n");
   }
 
+#if defined(PDENGINE_PDSINK)
+  /* pdsink path: the store may be the last SPR offer while the seam list is
+   * the EPR list - report the count of the live list the tables use. */
+  {
+    pdport_status_t st;
+    pdport_get_status(&st);
+    APP_LOG_Printf("The source offers %lu power levels (type 'caps' to list them).%s\r\n",
+                   (unsigned long)st.src_caps_count,
+                   (st.in_epr_mode != 0U) ? "  [EPR list]" : "");
+  }
+#else
   APP_LOG_Printf("The source offered %u power levels (type 'caps' to list them).\r\n",
                  (unsigned)p->NumberOfRcvSRCPDO);
+#endif
+
+#if defined(PDENGINE_PDSINK)
+  /* pdsink path: surface the seam-only facts the ST tables cannot carry
+     (PE state, revision, EPR mode/auto latch, wire counters). */
+  {
+    pdport_status_t st;
+
+    pdport_get_status(&st);
+    APP_LOG_Printf("  stack      : pdsink PE state %lu, %s%s\r\n",
+                   (unsigned long)st.pe_state,
+                   APP_EPR_PdRevLabel(st.revision),
+                   (st.explicit_contract != 0U) ? "" : " (no explicit contract)");
+    if (st.epr_source_capable != 0U || st.in_epr_mode != 0U)
+    {
+      APP_LOG_Printf("  EPR        : %s, source %s, auto-enter %s\r\n",
+                     (st.in_epr_mode != 0U) ? "MODE ACTIVE" : "SPR",
+                     (st.epr_source_capable != 0U) ? "EPR-capable"
+                                                   : "not EPR-capable",
+                     (st.epr_auto_enter != 0U) ? "on" : "off");
+    }
+    if (st.in_pps_contract != 0U)
+    {
+      APP_LOG_Write("  contract   : PPS (programmable) contract\r\n");
+    }
+    APP_LOG_Printf("  PD frames  : rx %lu (GoodCRC %lu), tx %lu, tx-ok %lu, "
+                   "tx-fail %lu, HR rx %lu / tx %lu\r\n",
+                   (unsigned long)st.rx_frames, (unsigned long)st.rx_goodcrc,
+                   (unsigned long)st.tx_frames, (unsigned long)st.tx_succeeded,
+                   (unsigned long)st.tx_failed, (unsigned long)st.hr_rx,
+                   (unsigned long)st.hr_sent);
+  }
+#endif
 
   if (s_auto_mv != 0U)
   {
@@ -759,6 +1272,116 @@ void APP_PD_Evaluate(uint8_t port, uint32_t *rdo, USBPD_CORE_PDO_Type_TypeDef *t
 
 USBPD_StatusTypeDef APP_PD_SendRequest(uint8_t port, uint8_t index, uint16_t mv, uint16_t ma)
 {
+#if defined(PDENGINE_PDSINK)
+  /* pdsink path: there is no USBPD_PE_Send_Request() to call - the request
+   * is queued on the pdsink DPM through the seam, which performs the AMS on
+   * its own schedule.  "Queued" is reported as USBPD_OK but is never "done":
+   * the outcome arrives through the seam events / snapshot sync above, and
+   * the request mirrors (RDOPosition/Requested*) are refreshed from the
+   * real negotiated contract when it lands. */
+  pdport_status_t st;
+  uint32_t pdo;
+  uint32_t omv = 0U;
+  uint32_t oma = 0U;
+  int rc = -1;
+
+  if (port >= USBPD_PORT_COUNT)
+  {
+    return USBPD_ERROR;
+  }
+  pdport_get_status(&st);
+  if ((st.attached == 0U) || (APP_PD_Port[port].Attached == 0U))
+  {
+    APP_LOG_Write("not attached\r\n");
+    return USBPD_ERROR;
+  }
+  if (st.src_caps_count == 0U)
+  {
+    APP_LOG_Write("no source caps yet (wait for the source to advertise; "
+                  "'getcaps' has no pdsink initiator)\r\n");
+    return USBPD_ERROR;
+  }
+  if ((index == 0U) || (index > st.src_caps_count))
+  {
+    APP_LOG_Printf("the source offers only %lu PDOs (see 'caps')\r\n",
+                   (unsigned long)st.src_caps_count);
+    return USBPD_ERROR;
+  }
+  pdo = st.src_caps[index - 1U];
+  if (pdo == 0U)
+  {
+    APP_LOG_Printf("PDO %u is not offered by this source\r\n", (unsigned)index);
+    return USBPD_ERROR;
+  }
+  if (APP_EPR_IsAvsPdo(pdo) != 0)
+  {
+    /* EPR AVS object: only reachable while in EPR mode (the SPR list has no
+       AVS).  Queue an EPR AVS request; the seam derives ma from the DPM
+       watt figure, clamped to the 5 A limit.  mv == 0 means "take the
+       highest point of the offered window that the user ceiling allows",
+       mirroring what build_rdo() does for the other PDO types. */
+    uint32_t lo = APP_EPR_AVS_MIN_MV(pdo);
+    uint32_t hi = APP_EPR_AVS_MAX_MV(pdo);
+    uint32_t want = (mv != 0U) ? (uint32_t)mv : hi;
+
+    if ((APP_EPR_Ctx.ceiling_mv != 0u) && (want > APP_EPR_Ctx.ceiling_mv))
+    {
+      want = APP_EPR_Ctx.ceiling_mv;
+    }
+    if (want < lo) { want = lo; }
+    if (want > hi) { want = hi; }
+    APP_PD_Port[port].PendingIndex = index;
+    APP_PD_Port[port].PendingVoltage = (uint16_t)want;
+    APP_PD_Port[port].PendingCurrent = ma;
+    APP_PD_Port[port].UserSelected = 1U;
+    rc = pdport_request_epr_avs(want, (uint32_t)ma);
+    omv = want;
+    oma = (uint32_t)ma;
+  }
+  else if (pdsink_resolve_op(pdo, mv, ma, &omv, &oma) != 0)
+  {
+    APP_LOG_Write("cannot build a request for that PDO\r\n");
+    return USBPD_ERROR;
+  }
+  else if (APP_PPS_IsApdo(pdo) != 0)
+  {
+    APP_PD_Port[port].PendingIndex = index;
+    APP_PD_Port[port].PendingVoltage = mv;
+    APP_PD_Port[port].PendingCurrent = ma;
+    APP_PD_Port[port].UserSelected = 1U;
+    rc = pdport_request_pps(omv, oma);
+  }
+  else
+  {
+    APP_PD_Port[port].PendingIndex = index;
+    APP_PD_Port[port].PendingVoltage = mv;
+    APP_PD_Port[port].PendingCurrent = ma;
+    APP_PD_Port[port].UserSelected = 1U;
+    rc = pdport_request_position((uint32_t)index, (uint32_t)mv, (uint32_t)ma);
+  }
+  if (rc != 0)
+  {
+    APP_LOG_Printf("REQUEST not queued by the pdsink DPM (%d): an explicit "
+                   "SPR contract must be active first\r\n", rc);
+    return USBPD_ERROR;
+  }
+
+  APP_DIAG_Inc(APP_DIAG_NEG_REQUEST);
+  APP_PD_Port[port].RDOPosition = index;
+  APP_PD_Port[port].RequestDOMsg = 0U;   /* RDO lives inside the pdsink DPM */
+  APP_PD_Port[port].RequestedVoltage = omv;
+  APP_PD_Port[port].RequestedCurrent = oma;
+  APP_PD_Port[port].SyntheticVbusMv = omv;
+  APP_LOG_Printf("REQUEST queued  PDO %u  %lu mV / %lu mA%s\r\n",
+                 (unsigned)index, (unsigned long)omv, (unsigned long)oma,
+                 (APP_EPR_IsAvsPdo(pdo) != 0) ? "  (EPR AVS)" : "");
+  /* remember for the 'remember' feature (re-apply after re-attach) */
+  APP_PD_Port[port].HaveLast = 1U;
+  APP_PD_Port[port].LastIndex = index;
+  APP_PD_Port[port].LastMv = omv;
+  APP_PD_Port[port].LastMa = oma;
+  return USBPD_OK;
+#else
   uint32_t rdo;
   USBPD_CORE_PDO_Type_TypeDef type;
   USBPD_StatusTypeDef st;
@@ -821,6 +1444,7 @@ USBPD_StatusTypeDef APP_PD_SendRequest(uint8_t port, uint8_t index, uint16_t mv,
     APP_PD_Port[port].LastMa = APP_PD_Port[port].RequestedCurrent;
   }
   return st;
+#endif /* PDENGINE_PDSINK */
 }
 
 /* ============================================================================

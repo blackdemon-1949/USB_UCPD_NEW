@@ -207,7 +207,7 @@ void APP_EPR_RefreshCable(void);
 void APP_EPR_OnSrcPdo(const uint8_t *ptr, uint32_t size);
 /** Called from USBPD_DPM_SetDataInfo for the partner's EPR_Mode object. */
 void APP_EPR_OnModeDo(const uint8_t *ptr, uint32_t size);
-#if defined(USBPDCORE_EPR)
+#if defined(USBPDCORE_EPR) && !defined(PDENGINE_PDSINK)
 USBPD_StatusTypeDef APP_EPR_RequestSrcCapa(uint8_t port);
 /** Send EPR_Mode(Enter); returns the real ST policy-engine status. */
 USBPD_StatusTypeDef APP_EPR_ModeEnter(uint8_t port);
@@ -216,6 +216,7 @@ USBPD_StatusTypeDef APP_EPR_ModeExit(uint8_t port);
 #endif
 /** Human-readable USBPD_StatusTypeDef, for honest CLI reporting. */
 const char *APP_EPR_StatusName(int st);
+const char *APP_EPR_PdRevLabel(uint32_t rev); /* wire Spec Revision -> text */
 /** Human-readable PE_Power contract state. */
 const char *APP_EPR_PowerStateName(uint8_t pe_power);
 /** Capture every ST precondition and layer counter at this instant. */

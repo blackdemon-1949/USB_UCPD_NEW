@@ -140,8 +140,14 @@ void APP_PDCAP_Init(void)
 
   APP_CAP_Init();
 
-  /* Take over the trace funnel registered by USBPD_TRACE_Init(). */
+  /* Take over the trace funnel registered by USBPD_TRACE_Init().  On the
+   * pdsink path this call is never made (the capture engine is forced off
+   * and the closed PE that owns USBPD_PE_SetTrace is not linked), so the
+   * registration stays compiled out to keep the link free of the closed
+   * core; the DWT ring above is harmless either way. */
+#if !defined(PDENGINE_PDSINK)
   USBPD_PE_SetTrace(APP_PDCAP_Trace, 3u);
+#endif
 }
 
 /* ------------------------------------------------------------------ */

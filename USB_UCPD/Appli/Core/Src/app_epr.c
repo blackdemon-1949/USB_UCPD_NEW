@@ -7,6 +7,25 @@
 #include "app_cable.h"
 #if APP_ENG_EPR
 #include "usbpd_core.h"
+#if defined(APP_EPR_HOSTTEST)
+/* Host test build: no device layer, telemetry compiled out. */
+#define EPR_TELE_ARM()      ((void)0)
+#define EPR_TELE_DISARM()   ((void)0)
+#else
+#include "usbpd_hw_if.h"
+#define EPR_TELE_ARM()      (g_usbpd_tele = 1u)
+#define EPR_TELE_DISARM()   (g_usbpd_tele = 0u)
+#endif
+#endif
+#if defined(PDENGINE_PDSINK)
+#include "pdport_app.h"   /* pdsink C seam: EPR verbs + status snapshot */
+#if !APP_ENG_EPR
+/* pdsink profile forces APP_ENG_EPR off, so the telemetry macros from the
+ * include block above do not exist here.  There is no ST trace funnel on
+ * the pdsink path anyway (the seam driver counters feed the reports). */
+#define EPR_TELE_ARM()      ((void)0)
+#define EPR_TELE_DISARM()   ((void)0)
+#endif
 #endif
 /* The boundary probe reads the same two structures the ST library
  * dereferences (DPM_Settings for the EPR gate, DPM_Params for the contract
@@ -331,7 +350,7 @@ uint32_t APP_EPR_GetSinkPdpW(void)
   return (w > 240u) ? 240u : w;
 }
 
-#if defined(USBPDCORE_EPR)
+#if defined(USBPDCORE_EPR) && !defined(PDENGINE_PDSINK)
 /**
   * @brief  Actively ask the connected source for its EPR Source Capabilities.
   *
@@ -452,7 +471,7 @@ void APP_EPR_Diag(uint8_t port)
   APP_LOG_Printf("  power role         : %s\r\n", pr.power_role ? "SRC" : "SNK");
   APP_LOG_Printf("  contract           : %s\r\n", APP_EPR_PowerStateName(pr.pe_power));
   APP_LOG_Printf("  spec revision      : %s\r\n",
-                 (pr.spec_rev >= 2u) ? "PD3" : "PD2 (too old for EPR)");
+                 APP_EPR_PdRevLabel(pr.spec_rev));
   APP_LOG_Printf("  power range        : %s\r\n", pr.power_range ? "EPR" : "SPR");
   APP_LOG_Printf("  Is_EPR_Supported_SNK: %s\r\n", pr.epr_snk_flag ? "1 (enabled)" : "0 (GATE CLOSED)");
   APP_LOG_Write("  -- ST library gates --\r\n");
@@ -531,6 +550,10 @@ USBPD_StatusTypeDef APP_EPR_ModeEnter(uint8_t port)
 
   if (st == USBPD_OK)
   {
+    /* Arm the reply watchdog and the one-shot trace-UART telemetry that
+     * pinpoints where a freeze happens (PE run >B/>E, UCPD >T/>S, >L alive
+     * tick).  Disarmed again on reply/timeout below. */
+    EPR_TELE_ARM();
     /* Arm the reply watchdog.  "Queued" is not "entered": the partner still
      * has to answer with Enter Acknowledged / Succeeded / Failed.  Without
      * this the console would sit for ever showing a request that the source
@@ -569,6 +592,7 @@ void APP_EPR_PollEnter(void)
   }
 
   APP_EPR_Ctx.enter_pending = 0u;
+  EPR_TELE_DISARM();
   APP_EPR_Ctx.n_failed++;
   APP_LOG_Printf("EPR_Mode(Enter): NO REPLY from source within %u ms - "
                  "entry did not happen (source ignored the request)\r\n",
@@ -583,7 +607,117 @@ USBPD_StatusTypeDef APP_EPR_ModeExit(uint8_t port)
                  (st == USBPD_OK) ? " -> queued to PE" : " -> NOT queued");
   return st;
 }
-#endif /* USBPDCORE_EPR */
+#endif /* USBPDCORE_EPR && !PDENGINE_PDSINK */
+
+#if defined(PDENGINE_PDSINK)
+/* --- pdsink EPR report helpers (placed where the ST-core Probe/Diag/verbs
+ * used to be; the closed PE is not linked on this path). --- */
+void APP_EPR_Probe(uint8_t port, APP_EPR_Probe_t *pr)
+{
+  pdport_status_t st;
+
+  (void)port;
+  if (pr == NULL)
+  {
+    return;
+  }
+  memset(pr, 0, sizeof(*pr));
+  pdport_get_status(&st);
+
+  /* The pdsink PE has no DPM_Params word: every gate is derived from the
+   * seam snapshot, so a refusal can still be attributed to a real
+   * precondition.  Fields that only the closed ST core defines stay 0 and
+   * APP_EPR_Diag() below never prints them as facts. */
+  pr->spec_rev     = (st.revision >= 2u) ? 2u : 0u;   /* 2 = PD3+ */
+  pr->power_role   = 0u;                              /* sink only */
+  pr->pe_power     = (st.explicit_contract != 0u) ? 3u : 0u;
+  pr->is_connected = (uint8_t)st.attached;
+  pr->power_range  = (uint8_t)st.in_epr_mode;
+  pr->epr_snk_flag = APP_EPR_Ctx.allow;   /* local advertisement setting */
+  pr->epr_src_flag = (uint8_t)st.epr_source_capable;
+  pr->g_connected  = (uint8_t)st.attached;
+  pr->g_explicit   = (uint8_t)st.explicit_contract;
+  pr->g_sink_role  = 1u;
+  pr->g_rev3       = (st.revision >= 2u) ? 1u : 0u;
+  pr->g_epr_flag   = (uint8_t)st.epr_source_capable;
+  pr->extctrl_ok   = (uint8_t)(((st.attached != 0u) &&
+                                (st.explicit_contract != 0u) &&
+                                (st.revision >= 2u)) ? 1u : 0u);
+  /* EPR mode entry additionally needs the source to advertise EPR in its
+   * 5 V Fixed PDO; the pdsink DPM refuses entry without it. */
+  pr->modeenter_ok = (uint8_t)(((pr->extctrl_ok != 0u) &&
+                                (st.epr_source_capable != 0u)) ? 1u : 0u);
+  pr->pd_tx        = st.tx_frames;
+  pr->pd_rx        = st.rx_frames;
+  pr->goodcrc_rx   = st.rx_goodcrc;
+  pr->timeouts     = st.tx_failed;   /* PRL watch-dog timeouts == tx failures */
+  pr->prot_err     = 0u;
+}
+
+void APP_EPR_Diag(uint8_t port)
+{
+  APP_EPR_Probe_t pr;
+  pdport_status_t st;
+  uint32_t i;
+  uint32_t n_avs = 0u;
+
+  APP_EPR_Probe(port, &pr);
+  pdport_get_status(&st);
+  for (i = 0u; i < st.src_caps_count; i++)
+  {
+    if (APP_EPR_IsAvsPdo(st.src_caps[i]) != 0)
+    {
+      n_avs++;
+    }
+  }
+
+  APP_LOG_Write("EPR boundary report (pdsink PE - the ST core gates do not "
+                "exist on this path)\r\n");
+  APP_LOG_Printf("  stack          : pdsink, link %s, PE state %lu\r\n",
+                 APP_EPR_PdRevLabel(st.revision), (unsigned long)st.pe_state);
+  APP_LOG_Printf("  CC             : %s (CC%lu, level %lu)\r\n",
+                 (st.attached != 0u) ? "attached" : "NOT attached",
+                 (unsigned long)st.active_cc,
+                 (unsigned long)st.active_cc_level);
+  APP_LOG_Printf("  contract       : %s\r\n",
+                 (st.explicit_contract != 0u)
+                   ? ((st.in_pps_contract != 0u) ? "explicit, PPS"
+                      : ((st.in_epr_mode != 0u) ? "explicit, EPR"
+                                                : "explicit, SPR"))
+                   : "none yet");
+  APP_LOG_Printf("  negotiated     : PDO %lu, %lu mV / %lu mA%s\r\n",
+                 (unsigned long)st.contract_position,
+                 (unsigned long)st.contract_mv,
+                 (unsigned long)st.contract_ma,
+                 (st.in_epr_mode != 0u) ? "  (EPR operating point)" : "");
+  APP_LOG_Printf("  source caps    : %lu PDOs (%lu EPR AVS), %s\r\n",
+                 (unsigned long)st.src_caps_count, (unsigned long)n_avs,
+                 (st.epr_source_capable != 0u) ? "source is EPR-capable"
+                                               : "source NOT EPR-capable");
+  APP_LOG_Printf("  power range    : %s\r\n",
+                 (st.in_epr_mode != 0u) ? "EPR" : "SPR");
+  APP_LOG_Write("  -- gates (pdsink DPM preconditions) --\r\n");
+  APP_LOG_Printf("  EPR_Mode(Enter): %s\r\n",
+                 (pr.modeenter_ok != 0u) ? "all gates PASS - entry may queue"
+                 : "BLOCKED (needs attach + SPR explicit contract + PD3 "
+                   "revision + EPR-capable source)");
+  APP_LOG_Printf("    attached=%u explicit=%u pd3=%u srcepr=%u\r\n",
+                 (unsigned)pr.g_connected, (unsigned)pr.g_explicit,
+                 (unsigned)pr.g_rev3, (unsigned)pr.g_epr_flag);
+  APP_LOG_Printf("  auto-enter     : %s   ('epr on|off')\r\n",
+                 (st.epr_auto_enter != 0u) ? "on" : "off");
+  APP_LOG_Printf("  local advert   : %s   (RDO EPR-capable bit)\r\n",
+                 (APP_EPR_Ctx.allow != 0u) ? "EPR-capable" : "suppressed");
+  APP_LOG_Write("  -- layer counters (cumulative, seam driver) --\r\n");
+  APP_LOG_Printf("  PD TX frames   : %lu\r\n", (unsigned long)pr.pd_tx);
+  APP_LOG_Printf("  PD RX frames   : %lu\r\n", (unsigned long)pr.pd_rx);
+  APP_LOG_Printf("  GoodCRC RX     : %lu\r\n", (unsigned long)pr.goodcrc_rx);
+  APP_LOG_Printf("  hard reset rx  : %lu   tx : %lu\r\n",
+                 (unsigned long)st.hr_rx, (unsigned long)st.hr_sent);
+  APP_LOG_Printf("  watch timeouts : %lu\r\n", (unsigned long)pr.timeouts);
+}
+#endif /* PDENGINE_PDSINK */
+
 
 const char *APP_EPR_StatusName(int st)
 {
@@ -595,6 +729,23 @@ const char *APP_EPR_StatusName(int st)
     case 3:  return "USBPD_BUSY (not connected / no SPR explicit contract yet)";
     case 4:  return "USBPD_TIMEOUT";
     default: return "unknown";
+  }
+}
+
+const char *APP_EPR_PdRevLabel(uint32_t rev)
+{
+  /* Human label for the 2-bit wire Spec Revision value reported by the
+   * stack.  10b is shared by the whole PD 3.x family (3.0/3.1/3.2 - there
+   * is no separate header value for 3.1/3.2; those revisions are told
+   * apart by PDO/RDO content, e.g. the EPR Mode Capable bit and EPR PDOs).
+   * A PD 3.1 EPR source therefore shows up here as "PD 3.x", and its EPR
+   * capability is reported separately by the source-capability probes. */
+  switch (rev)
+  {
+    case 0u:  return "PD 1.x/legacy (00b)";
+    case 1u:  return "PD 2.0 (01b)";
+    case 2u:  return "PD 3.x (10b: 3.0/3.1/3.2)";
+    default:  return "reserved (11b)";
   }
 }
 
@@ -617,10 +768,14 @@ void APP_EPR_PollTx(uint8_t port)
   {
     return;
   }
+#if defined(PDENGINE_PDSINK)
+  (void)port;   /* single-port pdsink path: no USBPD_PORT_COUNT here */
+#else
   if (port >= USBPD_PORT_COUNT)
   {
     return;
   }
+#endif
 
 #if defined(APP_EPR_TARGET_PROBE)
   tx_now  = APP_DIAG_Get(APP_DIAG_PD_TX);
@@ -696,7 +851,8 @@ void APP_EPR_OnSrcPdo(const uint8_t *ptr, uint32_t size)
     }
   }
 
-#if defined(USBPDCORE_EPR) && (defined(USBPDCORE_SNK) || defined(USBPDCORE_DRP))
+#if defined(USBPDCORE_EPR) && !defined(PDENGINE_PDSINK) && \
+    (defined(USBPDCORE_SNK) || defined(USBPDCORE_DRP))
   /* THE ACTUAL MISSING WIRING.
    *
    * Reached once the source's EPR_Source_Capabilities have actually been
@@ -809,12 +965,14 @@ void APP_EPR_OnNotify(uint32_t event)
       break;
 
     case APP_EPR_NOTIFY_MODE_SUCCEEDED:
+      EPR_TELE_DISARM();
       APP_EPR_Ctx.entered = 1u;
       APP_EPR_Ctx.mode = 1u;
       APP_EPR_Ctx.last_action = APP_EPR_ACT_ENTER_SUCCEEDED;
       break;
 
     case APP_EPR_NOTIFY_MODE_FAILED:
+      EPR_TELE_DISARM();
       APP_EPR_Ctx.n_failed++;
       APP_EPR_Ctx.entered = 0u;
       APP_EPR_Ctx.mode = 0u;
@@ -823,6 +981,7 @@ void APP_EPR_OnNotify(uint32_t event)
       break;
 
     case APP_EPR_NOTIFY_MODE_EXIT:
+      EPR_TELE_DISARM();
       APP_EPR_Ctx.n_exit++;
       APP_EPR_Ctx.entered = 0u;
       APP_EPR_Ctx.mode = 0u;
@@ -896,6 +1055,237 @@ uint8_t APP_EPR_ShouldRequest(void)
 
 int APP_EPR_Cmd(int argc, char *argv[])
 {
+#if defined(PDENGINE_PDSINK)
+  /* pdsink path: the verbs map onto the seam, so a result line states what
+   * the pdsink PE actually did ("queued", never "sent"), and the reports
+   * read the seam snapshot and cannot drift from the wire state. */
+  unsigned v;
+  pdport_status_t st;
+  int rc;
+  uint32_t i;
+
+  if (argc >= 3)
+  {
+    if (sscanf(argv[2], "%u", &v) != 1)
+    {
+      APP_LOG_Write("usage: epr [on|off|enter|exit|caps|request [<mv>]|diag|ceiling <mv>|want <mv>|status]\r\n");
+      return 1;
+    }
+  }
+
+  if (argc < 2)
+  {
+    argv[1] = (char *)"status";
+  }
+
+  pdport_get_status(&st);
+
+  if (strcmp(argv[1], "on") == 0)
+  {
+    APP_EPR_Ctx.enable = 1u;
+    (void)pdport_epr_auto(1);
+    APP_LOG_Printf("EPR auto-enter ON, ceiling %lu mV - entry is attempted "
+                   "after the first SPR explicit contract with an "
+                   "EPR-capable source\r\n",
+                   (unsigned long)APP_EPR_Ctx.ceiling_mv);
+  }
+  else if (strcmp(argv[1], "off") == 0)
+  {
+    APP_EPR_Ctx.enable = 0u;
+    (void)pdport_epr_auto(0);
+    APP_LOG_Write("EPR auto-enter OFF - manual 'epr enter' still available; "
+                  "an active EPR contract is not disturbed\r\n");
+  }
+  else if (strcmp(argv[1], "enter") == 0)
+  {
+    rc = pdport_epr_enter();
+    if (rc == PDPORT_EPR_ENTER_QUEUED)
+    {
+      APP_LOG_Write("EPR_Mode(Enter) queued to the pdsink PE - awaiting the "
+                    "source reply; watch 'status' for EPR mode\r\n");
+    }
+    else if (rc == PDPORT_EPR_ENTER_ALREADY)
+    {
+      APP_LOG_Write("already in EPR mode\r\n");
+    }
+    else
+    {
+      APP_LOG_Write("EPR_Mode(Enter) refused: an SPR explicit contract with "
+                    "a PD3, EPR-capable source must be active first\r\n");
+    }
+  }
+  else if (strcmp(argv[1], "exit") == 0)
+  {
+    rc = pdport_epr_exit();
+    switch (rc)
+    {
+      case PDPORT_EPR_EXIT_QUEUED:
+        APP_LOG_Write("EPR_Mode(Exit) queued to the pdsink PE\r\n");
+        break;
+      case PDPORT_EPR_EXIT_NOT_ACTIVE:
+        APP_LOG_Write("not in EPR mode - nothing to exit\r\n");
+        break;
+      case PDPORT_EPR_EXIT_SPR_FIRST:
+        APP_LOG_Write("EPR exit is two-step: an SPR contract must be in "
+                      "place first - an SPR PDO was requested; run 'epr "
+                      "exit' again once 'status' shows an SPR contract\r\n");
+        break;
+      default:
+        APP_LOG_Write("EPR_Mode(Exit) refused (no SPR PDO available)\r\n");
+        break;
+    }
+  }
+  else if ((strcmp(argv[1], "request") == 0) && (argc >= 3))
+  {
+    /* 'epr request <mv>': queue an EPR AVS operating point. */
+    if (st.in_epr_mode == 0u)
+    {
+      APP_LOG_Write("EPR AVS requests need EPR mode first - run 'epr enter' "
+                    "(or 'epr on' for automatic entry)\r\n");
+    }
+    else
+    {
+      rc = pdport_request_epr_avs((uint32_t)v, 0u);
+      if (rc == 0)
+      {
+        APP_LOG_Printf("EPR AVS request queued for %u mV (ma derived from "
+                       "the DPM watt figure, clamped to 5 A)\r\n", v);
+      }
+      else
+      {
+        APP_LOG_Printf("EPR AVS request refused for %u mV - it must sit "
+                       "inside an offered AVS window (see 'epr caps')\r\n", v);
+      }
+    }
+  }
+  else if ((strcmp(argv[1], "request") == 0) || (strcmp(argv[1], "caps") == 0))
+  {
+    /* No standalone "fetch EPR source caps" verb exists on the pdsink path:
+     * the source sends EPR_Source_Capabilities right after EPR mode entry.
+     * Report what is on the wire instead of pretending a request went out. */
+    if (st.attached == 0u)
+    {
+      APP_LOG_Write("not attached\r\n");
+    }
+    else if (st.in_epr_mode == 0u)
+    {
+      APP_LOG_Printf("EPR source caps arrive only after EPR mode entry - run "
+                     "'epr enter' (source EPR-capable: %s)\r\n",
+                     (st.epr_source_capable != 0u) ? "yes" : "no");
+    }
+    else
+    {
+      uint32_t n_avs = 0u;
+      char line[96];
+
+      for (i = 0u; i < st.src_caps_count; i++)
+      {
+        if ((st.src_caps[i] != 0u) && (APP_EPR_IsAvsPdo(st.src_caps[i]) != 0))
+        {
+          n_avs++;
+        }
+      }
+      APP_LOG_Printf("in EPR mode: %lu PDOs on the wire, %lu EPR AVS; the "
+                     "decoded full list is under 'caps'\r\n",
+                     (unsigned long)st.src_caps_count, (unsigned long)n_avs);
+      for (i = 0u; i < st.src_caps_count; i++)
+      {
+        if (APP_EPR_IsAvsPdo(st.src_caps[i]) == 0)
+        {
+          continue;
+        }
+        APP_EPR_FormatAvs(st.src_caps[i], line, sizeof(line));
+        APP_LOG_Printf("   [%lu] %s\r\n", (unsigned long)(i + 1u), line);
+      }
+      if (n_avs == 0u)
+      {
+        APP_LOG_Write("   (no AVS object in the current EPR list)\r\n");
+      }
+    }
+  }
+  else if (strcmp(argv[1], "diag") == 0)
+  {
+    APP_EPR_Diag(0u);
+  }
+  else if ((strcmp(argv[1], "ceiling") == 0) && (argc >= 3))
+  {
+    if ((v < APP_EPR_MIN_MV) || (v > APP_EPR_MAX_MV))
+    {
+      APP_LOG_Printf("ceiling must be %u..%u mV\r\n",
+                     (unsigned)APP_EPR_MIN_MV, (unsigned)APP_EPR_MAX_MV);
+    }
+    else
+    {
+      APP_EPR_Ctx.ceiling_mv = v;
+      APP_LOG_Printf("EPR ceiling %u mV (PDP %lu W)\r\n", v,
+                     (unsigned long)APP_EPR_GetSinkPdpW());
+    }
+  }
+  else if ((strcmp(argv[1], "want") == 0) && (argc >= 3))
+  {
+    APP_EPR_Ctx.want_mv = v;
+    APP_LOG_Printf("EPR target %u mV (0 = highest available)\r\n", v);
+  }
+  else
+  {
+    /* Report what the pdsink seam actually knows - no ST-core wording. */
+    APP_LOG_Write("EPR\r\n");
+    APP_LOG_Printf("  engine     : pdsink PE (open core) - no ST core gates\r\n");
+    if (st.attached == 0u)
+    {
+      APP_LOG_Write("  source     : none attached\r\n");
+    }
+    else
+    {
+      APP_LOG_Printf("  source     : %s, %s, %lu PDOs\r\n",
+                     APP_EPR_PdRevLabel(st.revision),
+                     (st.epr_source_capable != 0u) ? "EPR-capable (5 V PDO "
+                                                     "EPR bit SET)"
+                                                   : "SPR-only (EPR bit "
+                                                     "clear)",
+                     (unsigned long)st.src_caps_count);
+      APP_LOG_Printf("  mode       : %s\r\n",
+                     (st.in_epr_mode != 0u) ? "EPR" : "SPR");
+      APP_LOG_Printf("  contract   : %s, PDO %lu, %lu mV / %lu mA%s\r\n",
+                     (st.explicit_contract != 0u) ? "explicit" : "none",
+                     (unsigned long)st.contract_position,
+                     (unsigned long)st.contract_mv,
+                     (unsigned long)st.contract_ma,
+                     (st.in_pps_contract != 0u) ? " (PPS)" : "");
+      APP_LOG_Printf("  auto-enter : %s   ('epr on|off')\r\n",
+                     (st.epr_auto_enter != 0u) ? "on" : "off");
+    }
+    APP_LOG_Printf("  last action: %s\r\n",
+                   (APP_EPR_Ctx.last_action == 0u)
+                     ? "none (no EPR_Mode message outcome yet)"
+                     : APP_EPR_ActionName(APP_EPR_Ctx.last_action));
+    if (APP_EPR_Ctx.error_valid != 0u)
+    {
+      APP_LOG_Printf("  last error : %s\r\n",
+                     APP_EPR_ErrorName(APP_EPR_Ctx.last_error));
+    }
+    APP_LOG_Printf("  counters   : srccap %lu enter %lu exit %lu failed %lu\r\n",
+                   (unsigned long)APP_EPR_Ctx.n_src_cap,
+                   (unsigned long)APP_EPR_Ctx.n_enter,
+                   (unsigned long)APP_EPR_Ctx.n_exit,
+                   (unsigned long)APP_EPR_Ctx.n_failed);
+    APP_LOG_Write("  -- sink capability (configuration only) --\r\n");
+    APP_LOG_Printf("  ceiling    : %lu mV\r\n",
+                   (unsigned long)APP_EPR_Ctx.ceiling_mv);
+    APP_LOG_Printf("  sink PDP   : %lu W\r\n",
+                   (unsigned long)APP_EPR_GetSinkPdpW());
+    APP_LOG_Printf("  sink AVS   : 0x%08lX\r\n",
+                   (unsigned long)APP_EPR_GetSinkAvsPdo());
+    {
+      char line[96];
+      APP_EPR_FormatAvs(APP_EPR_GetSinkAvsPdo(), line, sizeof(line));
+      APP_LOG_Printf("               %s\r\n", line);
+    }
+    APP_LOG_Write("  source caps: decoded under 'caps'; AVS windows under "
+                  "'epr caps'; boundary report under 'epr diag'\r\n");
+  }
+  return 1;
+#else
   unsigned v;
   uint32_t i;
   char line[96];
@@ -1074,9 +1464,9 @@ int APP_EPR_Cmd(int argc, char *argv[])
                    (unsigned long)APP_EPR_Ctx.n_exit,
                    (unsigned long)APP_EPR_Ctx.n_failed);
   }
-  return 1;
-}
 
+#endif /* PDENGINE_PDSINK */
+}
 /* ------------------------------------------------------------------ */
 /* Minimal PD frame counter funnel                                     */
 /*                                                                     */
@@ -1095,7 +1485,8 @@ int APP_EPR_Cmd(int argc, char *argv[])
 /* nothing but bump counters and chain to the stock TRACER_EMB path, so */
 /* the CubeMonitor-UCPD trace stream is unaffected.                     */
 /* ------------------------------------------------------------------ */
-#if defined(APP_EPR_TARGET_PROBE) && !APP_ENG_CAPTURE && defined(_TRACE)
+#if defined(APP_EPR_TARGET_PROBE) && !APP_ENG_CAPTURE && defined(_TRACE) && \
+    !defined(PDENGINE_PDSINK)
 
 static void epr_trace_funnel(TRACE_EVENT type, uint8_t port, uint8_t sop,
                              uint8_t *ptr, uint32_t size)

@@ -26,6 +26,7 @@
 #include "usbpd_dpm_core.h"
 #include "usbpd_dpm_conf.h"
 #include "usbpd_dpm_user.h"
+#include "usbpd_hw_if.h"
 #include "main.h"
 
 #if defined(_LOW_POWER)
@@ -145,6 +146,20 @@ static void DPM_NoPowerRoleSwap(uint8_t PortNum,
   (void)Status;         /* no power-role swap on this board */
 }
 
+/* cb +0x40 (USBPD_PE_RequestDPMWhatToDo) is only populated under
+ * USBPDCORE_EPR.  The app's table used to stop at IsPowerReady, leaving this
+ * slot NULL; the library calls it unconditionally from its EPR source and
+ * USB-data paths (disassembly: usbpd_pe_epr.o +0x2da, usbpd_pe_usbdata.o
+ * +0xc2/+0x1e4), which would jump to address 0 on any build that reaches
+ * those paths.  This board is a sink-only, non-USB-data device: answer
+ * NOTSUPPORTED so the PE never acts on an action this app cannot honour. */
+static uint32_t DPM_NoWhatToDo(uint8_t PortNum, uint32_t IDAction)
+{
+  (void)PortNum;
+  (void)IDAction;
+  return (uint32_t)USBPD_NOTSUPPORTED;
+}
+
 
 USBPD_StatusTypeDef USBPD_DPM_InitCore(void)
 {
@@ -188,7 +203,8 @@ USBPD_StatusTypeDef USBPD_DPM_InitCore(void)
     USBPD_DPM_PE_VconnPwr,
     USBPD_DPM_EnterErrorRecovery,
     USBPD_DPM_EvaluateDataRoleSwap,
-    USBPD_DPM_IsPowerReady
+    USBPD_DPM_IsPowerReady,
+    DPM_NoWhatToDo
   };
 
   static const USBPD_CAD_Callbacks CAD_cbs =
@@ -411,8 +427,21 @@ void USBPD_DPM_Run(void)
   {
     if ((HAL_GetTick() - DPM_Sleep_start[port]) >= DPM_Sleep_time[port])
     {
+      /* EPR-freeze telemetry: one-shot checkpoints on the trace UART while
+       * the app has g_usbpd_tele armed (set when `epr enter` is accepted).
+       * >B before the PE run, >E only if the PE run returns.  A freeze
+       * inside the closed PE/PRL code therefore leaves ">B" with no ">E".
+       */
+      if (g_usbpd_tele != 0u)
+      {
+        USBPD_HW_IF_Tele("\r\n>B\r\n");
+      }
       DPM_Sleep_time[port] = USBPD_PE_StateMachine_SNK(port);
       DPM_Sleep_start[port] = HAL_GetTick();
+      if (g_usbpd_tele != 0u)
+      {
+        USBPD_HW_IF_Tele("\r\n>E\r\n");
+      }
     }
   }
 
