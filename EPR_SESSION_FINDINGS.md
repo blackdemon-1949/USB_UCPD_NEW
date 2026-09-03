@@ -102,6 +102,44 @@ experiment** below.
 
 
 
+
+## 2026-09-03 RESOLUTION: harmful EPR library calls replaced with safe gates (build 9cbbc65+)
+
+Decision (per user directive - stop diagnosing, replace the harmful function
+with something simple that must work): the app no longer calls the three
+library EPR transmit APIs that were proven to hard-fault the system:
+`USBPD_PE_Request_EPRModeEnter`, `USBPD_PE_Request_EPRModeExit` and the EPR
+extended-control send (EPR_GETSRCCAPA).  The library binary is closed and
+cannot be patched; every build that queued its EPR AMS died on the next PE
+run regardless of source type.  Replacement behaviour:
+
+- `APP_EPR_ModeEnter` / `APP_EPR_ModeExit` / `APP_EPR_RequestSrcCapa` are now
+  safe gates: probe the port, print a clear refusal, return USBPD_NOTSUPPORTED
+  (USBPD_BUSY when there is no explicit contract - same as the old no-source
+  behaviour).  Nothing is queued, nothing is transmitted, no telemetry is
+  armed, no pending state is left behind.
+- `epr on` no longer arms auto-entry; `epr request` no longer sets enable; the
+  deferred `enter_wanted` auto-arm in `APP_EPR_OnSrcPdo` is compiled out.
+- Passive EPR detection, `epr status` / `epr diag`, ceiling/want settings and
+  the RDO EPR-capable bit logic are unchanged.  SPR / PPS / CDC / INA226 /
+  VDM are untouched.
+
+Proof-of-working on the bench (expected, and reproducible by the user):
+1. Attach any source, get an explicit contract (LED solid), type `epr enter`.
+2. Expect: `EPR_Mode(Enter): disabled in this build - the ST PE EPR-AMS
+   transmit path hard-faults this board, so entry is refused before anything
+   is queued (status USBPD_NOTSUPPORTED)` and the prompt returns immediately.
+3. The board keeps running: `status`, `pd`, `help`, further commands all work;
+   no reset, no freeze, LED stays on contract.
+4. Repeat for `epr request`, `epr caps`, `epr exit`, `epr on` - all refuse
+   safely.  `epr status` / `epr diag` still report normally.
+
+Real EPR-mode entry remains unavailable in this build by design: the only
+software path to it (the ST PE EPR AMS) hard-faults the silicon integration
+and root-causing it needs the hardware debug session the user has ruled out.
+If EPR entry is ever re-enabled, it must first be proven on hardware with a
+debugger attached; the no-brick gate must not be removed earlier.
+
 ## 2026-09-03 round 3: trace evidence + fatal self-report build 805f586
 
 Bench evidence this round: the USART1 trace stream works (periodic `PHY ord=`
