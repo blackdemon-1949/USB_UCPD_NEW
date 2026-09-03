@@ -135,8 +135,10 @@ engine, EPR telemetry, VDM/cable UI, host tests) is retained and adapted
 to pdsink's `IDPM`.
 
 Milestones (each bench-gated; no claim without a live board):
-1. **Host bring-up**: vendor pdsink core + ETL into the tree; its own
-   unit tests compile/run in the sandbox; add host tests for the glue.
+1. **Host bring-up** ✅ DONE (commit 1f38df3): pdsink core (df7e126) + ETL
+   20.43.0 vendored under `USB_UCPD/Middlewares/PDEngine`; the six upstream
+   googletest suites run green from the repo tree via
+   `tools/pdengine_hosttest/run.sh` (79 tests).
 2. **UCPD driver** (`drivers/ucpd_stm32h7r3`): CC detect/polarity,
    TX/RX via the proven GPDMA1 CH0/CH1 path, SOP filtering, GoodCRC
    hooks; modelled on the open ST device layer, keeping the DMA map.
