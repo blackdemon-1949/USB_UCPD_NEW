@@ -84,7 +84,7 @@ capstone Thumb disassembly + relocations):
     does the project pivot to pdsink/elagil/custom per the user's
     directive.
 
-## 2026-09-03 DECISIVE REAL-EPR BUILD (gates lifted)
+## 2026-09-03 DECISIVE REAL-EPR BUILD (gates lifted) — BENCH RESULT: froze again → ST-core EPR path closed, pivot triggered
 
 The safe-gate refusals (build 9cbbc65) are removed: `app_epr.c` /
 `app_cmd.c` are restored byte-identical to the 805f586-era state, so
@@ -98,18 +98,55 @@ countable slow-pulse blink, next-boot `*** PREVIOUS RUN FAULTED` banner,
 and the >B/>E PE-run telemetry marks armed automatically when `epr enter`
 is accepted.  Host gate: 149/149.
 
-Bench procedure (ONE run decides):
-1. Flash, attach the EPR-capable source, reach an explicit SPR contract.
-2. `epr enter`.  Two possible outcomes:
-   - **Works**: `Enter Succeeded`-class status / `epr status` shows EPR,
-     board alive, console responsive → real EPR delivered; then exercise
-     `epr caps`, `epr request`, `epr exit`, `pd`, `status`.
-   - **Freezes** (no console): press RESET, then paste the first ~10 CDC
-     lines of the next boot — expect `*** PREVIOUS RUN FAULTED: <name>
-     PC=0x90xxxxxx` plus the decode command, or a countable PB2 blink
-     code, or nothing (which itself discriminates: hang vs fault).  Also
-     watch USART1 during the freeze for `***FAULT` / `>B` / `>E` marks.
-3. Whatever the outcome, paste the transcript verbatim.
+**Round-5 bench result (user, 2026-09-03):** with the EPR-capable source
+(6-PDO charger incl. PPS; 5 V PDO EPR bit SET) SPR behaviour is fully
+healthy — multiple explicit contracts, PPS renegotiation to 21 V/5 A on
+PDO 6, all console-responsive.  `epr caps` (`EPR_Get_Source_Cap`) was
+accepted by the PE AMS slot (`API status = USBPD_OK (0) -> ACCEPTED...`)
+and the prompt returned.  `epr enter` then froze the system again,
+exactly as every pre-gate build.  No reset/banner/blink data was captured
+this round.  Per the user's standing decision rule ("if none of these
+give a promising result, use other manufacturers' cores and middlewares
+/ build one yourself"), the ST closed-core EPR path is now **closed**:
+two independent rounds with every app-side suspect fixed and a
+byte-current ST core still freeze on the EPR AMS.  The user's read —
+"it is the EPR-capable device detection / EPR path itself" — matches the
+evidence: only EPR-mode traffic through the closed PE/PRL dies.
+
+## 2026-09-03 PIVOT: self-built / open-source protocol engine (pdsink core + own UCPD driver)
+
+Decision (user directive): replace the closed ST PE/PRL with an open,
+full-source engine.  Source survey (round 4): TI ships PD only inside its
+own PD-controller chips (not portable to STM32 UCPD); Zephyr usbc has no
+EPR-sink coverage; the two credible open stacks are `pdsink/pdsink`
+(MIT, C++, sink-only PD 3.2 with SPR+PPS+EPR; layered tc/prl/pe/dpm;
+platform-agnostic core behind `ITCPC`/`ITimer`/`IDPM` interfaces;
+validated on FUSB302B+FreeRTOS, "early stage") and `elagil/usbpd`
+(MIT, Rust/Embassy policy engine; working UCPD EPR example on STM32G431).
+For this C/CubeIDE project the C++ pdsink core is the selected base
+(elagil stays as a spec/behaviour reference); the ST USBPD **device**
+layer (usbpd_phy.c / usbpd_hw_if_it.c / usbpd_hw.c / timers — open,
+register-level, bench-proven for SPR TX/RX) becomes the reference model
+for a new compact UCPD driver implementing `ITCPC` with
+`TCPC_HW_FEATURES{rx_auto_goodcrc_send:false, tx_auto_goodcrc_check:false,
+tx_auto_retry:false}` — GoodCRC and retry logic then live in pdsink's own
+PRL (as they do on FUSB302).  The existing app layer (CLI, INA226, PPS
+engine, EPR telemetry, VDM/cable UI, host tests) is retained and adapted
+to pdsink's `IDPM`.
+
+Milestones (each bench-gated; no claim without a live board):
+1. **Host bring-up**: vendor pdsink core + ETL into the tree; its own
+   unit tests compile/run in the sandbox; add host tests for the glue.
+2. **UCPD driver** (`drivers/ucpd_stm32h7r3`): CC detect/polarity,
+   TX/RX via the proven GPDMA1 CH0/CH1 path, SOP filtering, GoodCRC
+   hooks; modelled on the open ST device layer, keeping the DMA map.
+3. **SPR bench milestone**: attach + Source_Cap + Request + explicit
+   contract + PPS, with the ST core absent from the link.
+4. **Feature parity**: VDM/cable identity, existing CLI/status/EPR app
+   tables re-pointed at the new engine.
+5. **EPR bench milestone**: `EPR_Mode(Enter)` via pdsink's PE, AVS
+   request, exit — the acceptance bar (Enter Succeeded + board alive)
+   applies unchanged.
 
 
 
