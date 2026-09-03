@@ -132,7 +132,7 @@ static const APP_CMD_t s_cmds[] =
     APP_DIAG_Cmd },
 
   { "epr", "epr [on|off|enter|exit|caps|request|diag|ceiling <mv>|want <mv>|status]",
-    "EPR: detect/report always; on=auto-enter, enter=one manual attempt",
+    "EPR: passive detect/report; mode TX disabled (ST PE EPR AMS hard-faults)",
     APP_EPR_Cmd },
 
 #if APP_ENG_ANALYTICS

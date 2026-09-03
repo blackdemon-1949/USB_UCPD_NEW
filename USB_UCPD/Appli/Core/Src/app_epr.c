@@ -487,76 +487,72 @@ void APP_EPR_Diag(uint8_t port)
 
 USBPD_StatusTypeDef APP_EPR_RequestSrcCapa(uint8_t port)
 {
-  USBPD_StatusTypeDef st;
   APP_EPR_Probe_t before;
 
-  /* Record the exact gate state the library is about to evaluate, so a
-   * refusal can be attributed to a specific precondition rather than
-   * guessed at. */
+  /* SAFE REPLACEMENT: deliberately does NOT call
+   * USBPD_PE_Send_ExtendeControlMessage(EPR_GETSRCCAPA).  Every build that
+   * transmitted an EPR extended message through the ST PE/PRL path (this
+   * command and 'epr enter') hard-faulted the whole system on the next PE
+   * run - no ***FAULT text, ~70 Hz fatal blink, on any source type.  This
+   * gate never transmits and never enters the PE EPR machinery, so it
+   * cannot brick the board.  Detection / reporting stay fully passive. */
   APP_EPR_Probe(port, &before);
   APP_EPR_Ctx.probe = before;
+  APP_EPR_Ctx.getsrc_st = (uint8_t)USBPD_NOTSUPPORTED;
+  APP_EPR_Ctx.getsrc_valid = 1u;
+  APP_EPR_Ctx.getsrc_pending = 0u;
 
-  APP_LOG_Printf("EPR_Get_Source_Cap: entered, PE %s / %s / %s, EPRflag=%u\r\n",
-                 before.is_connected ? "connected" : "NOT-connected",
-                 before.power_role ? "SRC" : "SNK",
-                 APP_EPR_PowerStateName(before.pe_power),
-                 (unsigned)before.epr_snk_flag);
-
-  if (before.extctrl_ok == 0u)
+  if ((before.is_connected == 0u) ||
+      (before.pe_power != USBPD_POWER_EXPLICITCONTRACT))
   {
-    /* The library would return without building a message.  Say so plainly
-     * instead of calling the API and reporting a misleading status. */
-    APP_LOG_Printf("EPR_Get_Source_Cap: BLOCKED by ST gate "
-                   "(connected=%u explicit=%u sink=%u eprflag=%u) - "
-                   "no message will be built\r\n",
-                   (unsigned)before.g_connected, (unsigned)before.g_explicit,
-                   (unsigned)before.g_sink_role, (unsigned)before.g_epr_flag);
+    APP_LOG_Printf("EPR_Get_Source_Cap: %s (not attached / no explicit SPR "
+                   "contract) - nothing sent\r\n",
+                   APP_EPR_StatusName((int)USBPD_BUSY));
+    return USBPD_BUSY;
   }
 
-  st = USBPD_PE_Send_ExtendeControlMessage(port,
-                                           USBPD_EXTENDED_CONTROL_EPR_GETSRCCAPA);
-  APP_EPR_Ctx.getsrc_st = (uint8_t)st;
-  APP_EPR_Ctx.getsrc_valid = 1u;
-  APP_EPR_Ctx.getsrc_tx_at = (uint32_t)before.pd_tx;
-  APP_EPR_Ctx.getsrc_pending = (uint8_t)((st == USBPD_OK) ? 1u : 0u);
-
-  /* "queued" is NOT "sent".  USBPD_OK means the PE accepted the request into
-   * its AMS slot; the frame only exists on CC once the PD TX counter moves
-   * and a GoodCRC comes back.  APP_EPR_PollTx() reports that separately. */
-  APP_LOG_Printf("EPR_Get_Source_Cap: API status = %s (%d)%s\r\n",
-                 APP_EPR_StatusName(st), (int)st,
-                 (st == USBPD_OK) ? " -> ACCEPTED into PE AMS slot (queued, NOT yet sent)"
-                                  : " -> REJECTED, nothing queued");
-  return st;
+  APP_LOG_Printf("EPR_Get_Source_Cap: disabled in this build - EPR "
+                 "extended-message TX through the ST PE hard-faults this "
+                 "board, so the request is refused before anything is queued "
+                 "(status %s)\r\n",
+                 APP_EPR_StatusName((int)USBPD_NOTSUPPORTED));
+  return USBPD_NOTSUPPORTED;
 }
 
 USBPD_StatusTypeDef APP_EPR_ModeEnter(uint8_t port)
 {
-  USBPD_StatusTypeDef st = USBPD_PE_Request_EPRModeEnter(port);
+  APP_EPR_Probe_t before;
 
-  APP_EPR_Ctx.enter_st = (uint8_t)st;
+  /* SAFE REPLACEMENT: deliberately does NOT call
+   * USBPD_PE_Request_EPRModeEnter().  That API queues the closed-library
+   * EPR AMS, and the very next PE run then hard-faults the whole system on
+   * any source - reproducible in every build, with no fault text captured.
+   * This gate never enters the PE EPR state machine and never transmits, so
+   * it cannot brick the board.  EPR detection / status reporting are
+   * unchanged and fully passive. */
+  APP_EPR_Probe(port, &before);
+  APP_EPR_Ctx.probe = before;
+  APP_EPR_Ctx.enter_st = (uint8_t)USBPD_NOTSUPPORTED;
   APP_EPR_Ctx.enter_valid = 1u;
-  APP_EPR_Ctx.enter_req_st = (uint8_t)st;
+  APP_EPR_Ctx.enter_req_st = (uint8_t)USBPD_NOTSUPPORTED;
+  APP_EPR_Ctx.enter_pending = 0u;
+  APP_EPR_Ctx.enter_deadline = 0u;
+  EPR_TELE_DISARM();
 
-  if (st == USBPD_OK)
+  if ((before.is_connected == 0u) ||
+      (before.pe_power != USBPD_POWER_EXPLICITCONTRACT))
   {
-    /* Arm the reply watchdog and the one-shot trace-UART telemetry that
-     * pinpoints where a freeze happens (PE run >B/>E, UCPD >T/>S, >L alive
-     * tick).  Disarmed again on reply/timeout below. */
-    EPR_TELE_ARM();
-    /* Arm the reply watchdog.  "Queued" is not "entered": the partner still
-     * has to answer with Enter Acknowledged / Succeeded / Failed.  Without
-     * this the console would sit for ever showing a request that the source
-     * silently ignored. */
-    APP_EPR_Ctx.enter_pending  = 1u;
-    APP_EPR_Ctx.enter_deadline = HAL_GetTick() + APP_EPR_ENTER_REPLY_MS;
+    APP_LOG_Printf("EPR_Mode(Enter): %s (not attached / no explicit SPR "
+                   "contract) - nothing sent\r\n",
+                   APP_EPR_StatusName((int)USBPD_BUSY));
+    return USBPD_BUSY;
   }
 
-  APP_LOG_Printf("EPR_Mode(Enter): API status = %s (%d)%s\r\n",
-                 APP_EPR_StatusName(st), (int)st,
-                 (st == USBPD_OK) ? " -> ACCEPTED by PE (queued, awaiting source reply)"
-                                  : " -> REJECTED, nothing queued");
-  return st;
+  APP_LOG_Printf("EPR_Mode(Enter): disabled in this build - the ST PE EPR-AMS "
+                 "transmit path hard-faults this board, so entry is refused "
+                 "before anything is queued (status %s)\r\n",
+                 APP_EPR_StatusName((int)USBPD_NOTSUPPORTED));
+  return USBPD_NOTSUPPORTED;
 }
 
 /**
@@ -591,11 +587,14 @@ void APP_EPR_PollEnter(void)
 
 USBPD_StatusTypeDef APP_EPR_ModeExit(uint8_t port)
 {
-  USBPD_StatusTypeDef st = USBPD_PE_Request_EPRModeExit(port);
-  APP_LOG_Printf("EPR_Mode(Exit): API status = %s (%d)%s\r\n",
-                 APP_EPR_StatusName(st), (int)st,
-                 (st == USBPD_OK) ? " -> queued to PE" : " -> NOT queued");
-  return st;
+  /* SAFE REPLACEMENT: never calls USBPD_PE_Request_EPRModeExit().  EPR mode
+   * is never entered in this build, so there is nothing to exit; refuse
+   * instead of driving the PE EPR machinery that hard-faults the board. */
+  (void)port;
+  APP_LOG_Printf("EPR_Mode(Exit): disabled in this build (EPR mode is never "
+                 "entered; nothing to exit) - status %s\r\n",
+                 APP_EPR_StatusName((int)USBPD_NOTSUPPORTED));
+  return USBPD_NOTSUPPORTED;
 }
 #endif /* USBPDCORE_EPR */
 
@@ -723,24 +722,22 @@ void APP_EPR_OnSrcPdo(const uint8_t *ptr, uint32_t size)
    * Only request entry when the source actually advertised AVS PDOs and the
    * operator has not disabled EPR.  Non-blocking: this posts a request to the
    * PE and returns, so it is safe to call from the DPM callback path. */
+  /* EPR-mode entry is DISABLED in this build: the closed-library EPR AMS
+   * path (USBPD_PE_Request_EPRModeEnter -> PE state 0xA8) hard-faults the
+   * whole system on the next PE run, on any source type, reproducibly and
+   * with no fault text captured.  APP_EPR_ModeEnter() is now a safe gate
+   * that never queues the AMS; therefore nothing may raise enter_wanted
+   * either (it would only produce a refused attempt per attach).  Passive
+   * detection / status reporting above are unchanged. */
+#if 0
   if ((APP_EPR_Ctx.src_epr_capable != 0u) &&
       (APP_EPR_Ctx.enable != 0u) &&
       (APP_EPR_Ctx.mode == 0u))
   {
-    /* DO NOT call into the policy engine from here.
-     *
-     * This function runs inside USBPD_DPM_SetDataInfo, i.e. on the PE's own
-     * call stack while it is processing a received message.  Calling
-     * USBPD_PE_Request_EPRModeEnter() from that context re-enters the state
-     * machine it is already executing and corrupts its AMS bookkeeping - on
-     * the bench that showed up as a hard lock that survived unplugging the
-     * source and needed the physical reset button (every fault handler in
-     * this project is a while(1), so a fault looks exactly like a brick).
-     *
-     * Just raise a flag; APP_PD_Task() performs the entry in task context. */
     APP_EPR_Ctx.enter_wanted = 1u;
   }
 #endif
+#endif /* USBPDCORE_EPR && (SNK || DRP) */
 }
 
 /**
@@ -921,7 +918,7 @@ int APP_EPR_Cmd(int argc, char *argv[])
   {
     if (sscanf(argv[2], "%u", &v) != 1)
     {
-      APP_LOG_Write("usage: epr [on|off|caps|enter|exit|request|diag|ceiling <mv>|want <mv>|status]\r\n");
+      APP_LOG_Write("usage: epr [on|off|enter|exit|caps|request|diag|ceiling <mv>|want <mv>|status]\r\n");
       return 1;
     }
   }
@@ -933,9 +930,13 @@ int APP_EPR_Cmd(int argc, char *argv[])
 
   if (strcmp(argv[1], "on") == 0)
   {
-    APP_EPR_Ctx.enable = 1u;
-    APP_LOG_Printf("EPR enabled, ceiling %lu mV\r\n",
-                   (unsigned long)APP_EPR_Ctx.ceiling_mv);
+    /* EPR-mode TX is disabled in this build (the ST PE EPR AMS hard-faults
+     * the board).  Do NOT arm auto-entry: it would only produce refused
+     * attempts.  SPR/PPS/VDM and passive EPR detection are unaffected. */
+    APP_EPR_Ctx.enable = 0u;
+    APP_LOG_Write("EPR auto-entry disabled in this build - the ST PE EPR-AMS "
+                  "transmit path hard-faults the board; 'epr enter' is a safe "
+                  "refusal. SPR/PPS unaffected.\r\n");
   }
   else if (strcmp(argv[1], "off") == 0)
   {
@@ -945,14 +946,13 @@ int APP_EPR_Cmd(int argc, char *argv[])
 #if defined(USBPDCORE_EPR)
   else if (strcmp(argv[1], "request") == 0)
   {
-    /* Actively start PD3.1 EPR discovery instead of waiting passively.
-     * Step 1: ask the source for EPR Source Capabilities. */
-    APP_EPR_Ctx.enable = 1u;
+    /* Safe gate: EPR extended-message TX is disabled in this build (see
+     * APP_EPR_RequestSrcCapa).  Deliberately does not arm auto-entry. */
     (void)APP_EPR_RequestSrcCapa(0u);
   }
   else if (strcmp(argv[1], "enter") == 0)
   {
-    /* One manual attempt.  Does NOT arm automatic entry - that is 'epr on'. */
+    /* Safe gate: never queues the library EPR AMS (see APP_EPR_ModeEnter). */
     (void)APP_EPR_ModeEnter(0u);
   }
   else if (strcmp(argv[1], "exit") == 0)
