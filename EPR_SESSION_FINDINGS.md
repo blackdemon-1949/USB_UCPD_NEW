@@ -101,6 +101,35 @@ The three mechanisms are cleanly separated by the **serial-isolation
 experiment** below.
 
 
+
+## 2026-09-03 round 3: trace evidence + fatal self-report build 805f586
+
+Bench evidence this round: the USART1 trace stream works (periodic `PHY ord=`
+frames every ~1 s come from APP_PD_Task in the main loop), the source is a
+real charger (6 PDO incl. PPS, contract 5 V/3 A), and at the freeze the PB2
+LED blinks at ~70 Hz.  A ~70 Hz blink can ONLY come from the Appli_Fail
+fatal/fault blinkers (main-loop LED patterns are 0.25 s/1 s/solid), so a
+fatal path IS running; but vector faults print `***FAULT` first and none was
+captured, and the non-vector fatals (Error_Handler=7, DPM fatal=8) left no
+record at all.  Build 805f586 therefore:
+
+- slows the Appli_Fail blink to ~200 ms pulses + ~1 s pause so the code is
+  countable: N = number of slow pulses per group
+  (2=HardFault 3=MemManage 4=BusFault 5=UsageFault 7=init fatal 8=DPM fatal);
+- makes EVERY Appli_Fatal path write a BKPSRAM record, so after the freeze a
+  RESET makes the CDC console print `*** PREVIOUS RUN FAULTED: <name> (code N)`
+  on the next boot - no USART1 capture needed;
+- fills the one NULL PE callback slot (cb+0x40 RequestDPMWhatToDo, EPR-source
+  and USB-data paths only) with a NOTSUPPORTED stub.
+
+Bench procedure for 805f586:
+1. attach source -> contract -> `epr enter` (freeze).
+2. Look at PB2: count slow pulses per group (N).
+3. Watch the USART1 trace terminal: do `PHY ord=` frames keep printing every
+   second? any `>B`/`>E`/`>T`/`>S`/`>L`/`***FAULT` marks?
+4. Press RESET; paste the first ~10 CDC lines (expect a PREVIOUS RUN FAULTED
+   banner if any fatal path ran).
+
 ## 2026-09-03 second report + one-shot trace telemetry (build 508e200)
 
 User re-tested the bounded-DMA build on the bench: **identical freeze** - after
