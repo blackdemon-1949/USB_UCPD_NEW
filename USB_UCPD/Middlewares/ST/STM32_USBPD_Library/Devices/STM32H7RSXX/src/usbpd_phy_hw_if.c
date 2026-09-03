@@ -99,11 +99,60 @@ const __IO uint32_t *pUCPD_TRIM_Rd_CC1  = (uint32_t *)(0x52002834UL);
 const __IO uint32_t *pUCPD_TRIM_Rd_CC2  = (uint32_t *)(0x52002834UL);
 #endif /* UCPD_CFG3_TRIM_CC1_RP */
 
+/* Bounded stop poll: a GPDMA channel that honours SUSP clears EN within a
+ * few bus cycles of the current transfer boundary.  200000 CCR reads is
+ * roughly a millisecond of bus traffic - orders of magnitude above any
+ * legitimate suspend, small enough that the one-time pathological path
+ * cannot starve the system. */
+#define USBPD_DMA_STOP_MAX_POLL  200000UL
+
 /* Private function prototypes -----------------------------------------------*/
 USBPD_PORT_HandleTypeDef Ports[USBPD_PORT_COUNT];
 
 
 /* Private functions ---------------------------------------------------------*/
+
+
+uint32_t USBPD_HW_IF_DMAStop(DMA_Channel_TypeDef *hdma, uint8_t is_rx)
+{
+  uint32_t guard = USBPD_DMA_STOP_MAX_POLL;
+
+  SET_BIT(hdma->CCR, DMA_CCR_SUSP | DMA_CCR_RESET);
+  while (((hdma->CCR & DMA_CCR_EN) == DMA_CCR_EN) && (guard != 0UL))
+  {
+    guard--;
+  }
+  if (guard != 0UL)
+  {
+    return 0UL;
+  }
+
+  /* EN did not clear within the budget: latch what the channel looks like
+   * for the `board` CLI dump, then force the channel reset once more. */
+  if (is_rx != 0U)
+  {
+    g_usbpd_dbg.dma_rx_stop_tmo++;
+  }
+  else
+  {
+    g_usbpd_dbg.dma_tx_stop_tmo++;
+  }
+  g_usbpd_dbg.dma_stop_ccr  = hdma->CCR;
+  g_usbpd_dbg.dma_stop_cbr1 = hdma->CBR1;
+  if (g_usbpd_tele != 0u)
+  {
+    USBPD_HW_IF_Tele("\r\n>TMO\r\n");
+  }
+
+  SET_BIT(hdma->CCR, DMA_CCR_RESET);
+  guard = USBPD_DMA_STOP_MAX_POLL;
+  while (((hdma->CCR & DMA_CCR_EN) == DMA_CCR_EN) && (guard != 0UL))
+  {
+    guard--;
+  }
+  return (guard == 0UL) ? 2UL : 1UL;
+}
+
 
 
 void USBPD_HW_IF_GlobalHwInit(void)
@@ -214,8 +263,18 @@ USBPD_StatusTypeDef USBPD_HW_IF_SendBuffer(uint8_t PortNum, USBPD_SOPType_TypeDe
 #if defined(_LOW_POWER)
         UTIL_LPM_SetStopMode(0 == PortNum ? LPM_PE_0 : LPM_PE_1, UTIL_LPM_DISABLE);
 #endif /* _LOW_POWER */
-        SET_BIT(Ports[PortNum].hdmatx->CCR, DMA_CCR_SUSP | DMA_CCR_RESET);
-        while ((Ports[PortNum].hdmatx->CCR &  DMA_CCR_EN) == DMA_CCR_EN);
+        /* Bounded stop: a TX DMA channel that fails to clear EN after
+         * SUSP|RESET must not hang the caller (PE task context) forever.
+         * A wedged channel reports 2 - do not start another transfer on it;
+         * the PRL layer times the lost message out and retries later. */
+        if (USBPD_HW_IF_DMAStop(Ports[PortNum].hdmatx, 0u) == 2UL)
+        {
+          if (g_usbpd_tele != 0u)
+          {
+            USBPD_HW_IF_Tele("\r\n>X\r\n");
+          }
+          return USBPD_ERROR;
+        }
 
         USBPD_CacheClean(pBuffer, Size);
         WRITE_REG(Ports[PortNum].hdmatx->CSAR, (uint32_t)pBuffer);
@@ -224,6 +283,10 @@ USBPD_StatusTypeDef USBPD_HW_IF_SendBuffer(uint8_t PortNum, USBPD_SOPType_TypeDe
 
         LL_UCPD_WriteTxPaySize(Ports[PortNum].husbpd, Size);
         LL_UCPD_SendMessage(Ports[PortNum].husbpd);
+        if (g_usbpd_tele != 0u)
+        {
+          USBPD_HW_IF_Tele("\r\n>T\r\n");
+        }
       }
     }
   }

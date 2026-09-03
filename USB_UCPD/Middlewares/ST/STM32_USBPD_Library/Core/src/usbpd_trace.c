@@ -111,8 +111,15 @@ void USBPD_TRACE_Init(void)
   /* initialize tracer module */
   TRACER_EMB_Init();
 
-  /* Initialize PE trace */
+  /* Initialize PE trace.  With PDENGINE_PDSINK the closed PE that owns
+   * USBPD_PE_SetTrace is not linked and USBPD_TRACE_Init() has no caller
+   * (its only caller, USBPD_DPM_InitCore(), is excluded on that path), so
+   * the registration is compiled out to keep the link free of the closed
+   * core.  The TRACER_EMB init/overflow lines above still run when this
+   * function is invoked. */
+#if !defined(PDENGINE_PDSINK)
   USBPD_PE_SetTrace(USBPD_TRACE_Add, 3u);
+#endif
 
   /* Initialize the overflow detection */
   (void)TRACER_EMB_EnableOverFlow(OverFlow_String, (uint8_t)sizeof(OverFlow_String));

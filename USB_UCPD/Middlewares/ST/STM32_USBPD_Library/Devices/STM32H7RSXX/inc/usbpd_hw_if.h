@@ -162,9 +162,38 @@ typedef struct
   volatile uint32_t txund;         /*!< TX underrun                                      */
   volatile uint16_t last_rx_hdr;   /*!< Message header of the last RX message (16-bit, LE) */
   volatile uint8_t  last_rx_sop;   /*!< Ordered-set code of the last RX message          */
+  volatile uint32_t dma_tx_stop_tmo; /*!< TX DMA stop did not clear EN within the poll budget */
+  volatile uint32_t dma_rx_stop_tmo; /*!< RX DMA stop did not clear EN within the poll budget */
+  volatile uint32_t dma_stop_ccr;    /*!< CCR snapshot at the last DMA stop timeout       */
+  volatile uint32_t dma_stop_cbr1;   /*!< CBR1 snapshot at the last DMA stop timeout      */
 } USBPD_DbgCounters_t;
 
 extern USBPD_DbgCounters_t g_usbpd_dbg;
+
+/**
+  * @brief  One-shot EPR freeze telemetry.
+  *
+  * The app arms g_usbpd_tele = 1 the moment `epr enter` is accepted by the PE
+  * (and clears it again on success/failure/timeout).  While armed, the device
+  * layer and the DPM core emit tiny ">X" checkpoints straight to the USART1
+  * trace UART using register writes only (no CDC, no trace ring, no heap), so
+  * a total system freeze still leaves a trail showing exactly where execution
+  * stopped: PE-run entry (>B), PE-run exit (>E), UCPD TX armed (>T), TX sent
+  * (>S), TX discarded (>D), TX aborted (>A), RX message end (>R), DMA stop
+  * timeout (>TMO).  The main loop also emits a 1 Hz >L alive tick while armed.
+  * Normal operation is completely unaffected: nothing is emitted until the
+  * app sets the latch.
+  */
+extern volatile uint8_t g_usbpd_tele;
+
+/**
+  * @brief  Raw checkpoint output on the USART1 trace UART (register level).
+  * @param  s NUL-terminated string (kept short, e.g. "\r\n>B\r\n").
+  * @retval None.  Bounded: never waits more than a short poll per character,
+  *         so it is safe from IRQ context and safe even if the UART clock or
+  *         the DMA tracer is in a bad state.
+  */
+void USBPD_HW_IF_Tele(const char *s);
 
 /**
   * @}
@@ -379,6 +408,27 @@ void    USBPD_HW_IF_EnableRX(uint8_t PortNum);
   * @retval None
   */
 void    USBPD_HW_IF_DisableRX(uint8_t PortNum);
+
+/**
+  * @brief  Stop a UCPD DMA channel with a bounded wait.
+  *
+  * The stock driver stops TX/RX DMA with `SET_BIT(CCR, SUSP | RESET)` and
+  * then spins on `while (CCR & EN)` forever.  GPDMA clears EN once the
+  * suspend/reset completes at the next transfer boundary; if the channel is
+  * waiting on a request line that never resumes, EN stays set and the
+  * unbounded spin freezes the whole system (no fault, no console, IRQs
+  * blocked) - the bench symptom seen when an EPR-mode AMS transmission is
+  * interrupted.  This variant bounds the wait, force-resets the channel once
+  * and latches diagnostics into g_usbpd_dbg, so a wedged channel can never
+  * hang the system again and the `board` CLI command reports it.
+  *
+  * @param  hdma  The DMA channel (Ports[x].hdmatx or hdmarx).
+  * @param  is_rx 1 for the RX channel, 0 for TX (selects the diag counter).
+  * @retval 0 = EN cleared normally; 1 = EN cleared only after a forced
+  *         channel reset; 2 = EN still set after the forced reset
+  *         (channel wedged; do not re-arm it).
+  */
+uint32_t USBPD_HW_IF_DMAStop(DMA_Channel_TypeDef *hdma, uint8_t is_rx);
 
 /**
   * @}
